@@ -33,7 +33,10 @@
 #    live video sizing needs (fresh input track formats after decoder initialization,
 #    Matroska display aspect ratios converted to pixel aspect in the stated direction,
 #    undeclared H.26x pixel aspect read from the current SPS by MediaCodec, and
-#    Theora pixel aspect retained by the Ogg header probe).
+#    Theora pixel aspect retained by the Ogg header probe), and seek needs (obsolete output
+#    rejected during a pending flush and MediaCodec's EOS drain interrupted for that flush),
+#    and still sizing needs (public Android software output converted into the visible
+#    rectangle, retaining decoder storage alignment and pool ownership).
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 

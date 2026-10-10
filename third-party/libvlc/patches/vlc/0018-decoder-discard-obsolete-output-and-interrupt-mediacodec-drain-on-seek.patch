@@ -1,0 +1,281 @@
+From e269fb851b570b886cd8d8423cd0d4d7b93ae2a0 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 10 Oct 2026 16:50:46 +0900
+Subject: [PATCH] decoder: discard obsolete output and interrupt MediaCodec
+ drain on seek
+
+Flush requests are asynchronous. MediaCodec can still deliver old pictures
+or wait for their EOS while the next seek has started buffering. Such
+pictures consume that seek's first-picture force and acknowledge its wait,
+starting the clock before the actual codec flush. Fresh target pictures
+then arrive late and are discarded by the video output.
+
+Reject video, audio, subtitle and stream output while the existing FIFO-
+protected flush flag is set. Wake output callbacks waiting on the old
+buffering cycle and preserve the first-picture state for fresh output.
+Use the owner-to-FIFO lock order; release the FIFO before waking callbacks.
+
+Expose a thread-safe query for the decoder module. MediaCodec stops
+queuing obsolete input and interrupts EOS draining when a flush or stop
+is pending. Check every 20 ms only during drain and retain the normal
+three-second EOS deadline. The decoder thread still performs the codec
+and output flushes, and only then clears its flag. Keep preroll, pause,
+clock conversion and ordinary end-of-stream draining intact.
+---
+ include/vlc_codec.h              |  7 +++
+ modules/codec/omxil/mediacodec.c | 19 ++++++-
+ src/input/decoder.c              | 88 +++++++++++++++++++++++++++++---
+ 3 files changed, 104 insertions(+), 10 deletions(-)
+
+diff --git a/include/vlc_codec.h b/include/vlc_codec.h
+index 8fed2f4..d3f9ae4 100644
+--- a/include/vlc_codec.h
++++ b/include/vlc_codec.h
+@@ -300,6 +300,13 @@ static inline picture_t *decoder_NewPicture( decoder_t *dec )
+  */
+ VLC_API void decoder_AbortPictures( decoder_t *dec, bool b_abort );
+ 
++/**
++ * Whether the owner has requested a flush or stop. A decoder may stop waiting
++ * for obsolete input/output buffers; its pf_flush will discard that timeline.
++ * This query is thread-safe and does not complete the flush itself.
++ */
++VLC_API bool decoder_IsFlushing( decoder_t *dec );
++
+ /**
+  * This function queues a single picture to the video output.
+  *
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 8263fe8..17b004a 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -1464,6 +1464,10 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+     /* Queue CSD blocks and input blocks */
+     while (b_drain || (p_block = GetNextBlock(p_sys, p_in_block)))
+     {
++        /* A pending seek discards this input instead of draining its pictures.
++         * Let the decoder thread reach pf_flush before accepting new input. */
++        if (decoder_IsFlushing(p_dec))
++            return VLC_SUCCESS;
+         int i_index;
+ 
+         vlc_mutex_unlock(&p_sys->lock);
+@@ -1480,6 +1484,8 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+         bool b_config = false;
+         vlc_tick_t i_ts = 0;
+         p_sys->b_input_dequeued = true;
++        if (decoder_IsFlushing(p_dec))
++            return VLC_SUCCESS;
+         const void *p_buf = NULL;
+         size_t i_size = 0;
+ 
+@@ -1562,9 +1568,18 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+          * behave correctly. */
+         vlc_tick_t deadline = mdate() + INT64_C(3000000);
+         while (!p_sys->b_aborted && !p_sys->b_drained
+-            && vlc_cond_timedwait(&p_sys->dec_cond, &p_sys->lock, deadline) == 0);
++               && !decoder_IsFlushing(p_dec))
++        {
++            vlc_tick_t now = mdate();
++            if (now >= deadline)
++                break;
++            /* The owner cannot signal this module's condition. Poll only while
++             * draining, retaining the normal EOS deadline when no seek occurs. */
++            vlc_cond_timedwait(&p_sys->dec_cond, &p_sys->lock,
++                               __MIN(deadline, now + INT64_C(20000)));
++        }
+ 
+-        if (!p_sys->b_drained)
++        if (!p_sys->b_drained && !decoder_IsFlushing(p_dec))
+         {
+             msg_Err(p_dec, "OutThread timed out");
+             AbortDecoderLocked(p_dec);
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 33d7f4b..9832424 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -765,7 +765,22 @@ void decoder_AbortPictures( decoder_t *p_dec, bool b_abort )
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
+-static void DecoderWaitUnblock( decoder_t *p_dec )
++/* Output callbacks hold the owner lock, while flush requests and completion
++ * use the FIFO lock. Never hold the FIFO while waiting for the owner. */
++static bool DecoderIsFlushing( decoder_owner_sys_t *p_owner )
++{
++    vlc_fifo_Lock( p_owner->p_fifo );
++    bool flushing = p_owner->flushing;
++    vlc_fifo_Unlock( p_owner->p_fifo );
++    return flushing;
++}
++
++bool decoder_IsFlushing( decoder_t *p_dec )
++{
++    return p_dec->p_owner != NULL && DecoderIsFlushing( p_dec->p_owner );
++}
++
++static bool DecoderWaitUnblock( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+ 
+@@ -773,10 +788,11 @@ static void DecoderWaitUnblock( decoder_t *p_dec )
+ 
+     for( ;; )
+     {
+-        if( !p_owner->b_waiting || !p_owner->b_has_data )
++        if( DecoderIsFlushing( p_owner ) || !p_owner->b_waiting || !p_owner->b_has_data )
+             break;
+         vlc_cond_wait( &p_owner->wait_request, &p_owner->lock );
+     }
++    return !DecoderIsFlushing( p_owner );
+ }
+ 
+ /* DecoderTimedWait: Interruptible wait
+@@ -870,6 +886,12 @@ static int DecoderPlaySout( decoder_t *p_dec, block_t *p_sout_block )
+     assert( !p_sout_block->p_next );
+ 
+     vlc_mutex_lock( &p_owner->lock );
++    if( DecoderIsFlushing( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        block_Release( p_sout_block );
++        return VLC_SUCCESS;
++    }
+ 
+     if( p_owner->b_waiting )
+     {
+@@ -877,7 +899,12 @@ static int DecoderPlaySout( decoder_t *p_dec, block_t *p_sout_block )
+         vlc_cond_signal( &p_owner->wait_acknowledge );
+     }
+ 
+-    DecoderWaitUnblock( p_dec );
++    if( !DecoderWaitUnblock( p_dec ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        block_Release( p_sout_block );
++        return VLC_SUCCESS;
++    }
+     DecoderFixTs( p_dec, &p_sout_block->i_dts, &p_sout_block->i_pts,
+                   &p_sout_block->i_length, NULL, INT64_MAX );
+ 
+@@ -1037,7 +1064,7 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     bool prerolled;
+ 
+     vlc_mutex_lock( &p_owner->lock );
+-    if( p_owner->i_preroll_end > p_picture->date )
++    if( DecoderIsFlushing( p_owner ) || p_owner->i_preroll_end > p_picture->date )
+     {
+         vlc_mutex_unlock( &p_owner->lock );
+         picture_Release( p_picture );
+@@ -1065,6 +1092,14 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     /* */
+     vlc_mutex_lock( &p_owner->lock );
+ 
++    /* A codec may still be draining the previous input. Its output must not
++     * consume the new seek's first picture or acknowledge its buffering. */
++    if( DecoderIsFlushing( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        goto discard;
++    }
++
+     if( p_owner->b_waiting && !p_owner->b_first )
+     {
+         p_owner->b_has_data = true;
+@@ -1072,7 +1107,11 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     }
+     bool b_first_after_wait = p_owner->b_waiting && p_owner->b_has_data;
+ 
+-    DecoderWaitUnblock( p_dec );
++    if( !DecoderWaitUnblock( p_dec ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        goto discard;
++    }
+ 
+     if( p_owner->b_waiting )
+     {
+@@ -1178,7 +1217,7 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
+     assert( p_audio != NULL );
+ 
+     vlc_mutex_lock( &p_owner->lock );
+-    if( p_owner->i_preroll_end > p_audio->i_pts )
++    if( DecoderIsFlushing( p_owner ) || p_owner->i_preroll_end > p_audio->i_pts )
+     {
+         vlc_mutex_unlock( &p_owner->lock );
+         block_Release( p_audio );
+@@ -1208,6 +1247,12 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
+ 
+     /* */
+     vlc_mutex_lock( &p_owner->lock );
++    if( DecoderIsFlushing( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        block_Release( p_audio );
++        return -1;
++    }
+     if( p_owner->b_waiting )
+     {
+         p_owner->b_has_data = true;
+@@ -1217,7 +1262,12 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
+     /* */
+     int i_rate = INPUT_RATE_DEFAULT;
+ 
+-    DecoderWaitUnblock( p_dec );
++    if( !DecoderWaitUnblock( p_dec ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        block_Release( p_audio );
++        return -1;
++    }
+     const vlc_tick_t i_stream_pts = p_audio->i_pts + p_owner->i_ts_delay;
+     DecoderFixTs( p_dec, &p_audio->i_pts, NULL, &p_audio->i_length,
+                   &i_rate, AOUT_MAX_ADVANCE_TIME );
+@@ -1316,6 +1366,12 @@ static void DecoderPlaySpu( decoder_t *p_dec, subpicture_t *p_subpic )
+ 
+     /* */
+     vlc_mutex_lock( &p_owner->lock );
++    if( DecoderIsFlushing( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        subpicture_Delete( p_subpic );
++        return;
++    }
+ 
+     if( p_owner->b_waiting )
+     {
+@@ -1323,7 +1379,12 @@ static void DecoderPlaySpu( decoder_t *p_dec, subpicture_t *p_subpic )
+         vlc_cond_signal( &p_owner->wait_acknowledge );
+     }
+ 
+-    DecoderWaitUnblock( p_dec );
++    if( !DecoderWaitUnblock( p_dec ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        subpicture_Delete( p_subpic );
++        return;
++    }
+     DecoderFixTs( p_dec, &p_subpic->i_start, &p_subpic->i_stop, NULL,
+                   NULL, INT64_MAX );
+     vlc_mutex_unlock( &p_owner->lock );
+@@ -2200,6 +2261,17 @@ void input_DecoderFlush( decoder_t *p_dec )
+     vlc_cond_signal( &p_owner->wait_timed );
+ 
+     vlc_fifo_Unlock( p_owner->p_fifo );
++
++    /* Release callbacks waiting on the old buffering cycle. Fresh output can
++     * acknowledge the new cycle only after the codec and vout have flushed. */
++    vlc_mutex_lock( &p_owner->lock );
++    if( p_owner->b_waiting )
++    {
++        p_owner->b_first = true;
++        p_owner->b_has_data = false;
++    }
++    vlc_cond_signal( &p_owner->wait_request );
++    vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
+ void input_DecoderGetCcDesc( decoder_t *p_dec, decoder_cc_desc_t *p_desc )
+-- 
+2.55.0
+

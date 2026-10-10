@@ -1,0 +1,123 @@
+From: Drive Player <drive-player@localhost>
+Date: Sat, 10 Oct 2026 20:53:53 +0900
+Subject: [PATCH] android-display: crop public software output to visible pixels
+
+The public ANativeWindow API cannot crop a software buffer. Passing the
+source's coded dimensions to it queues decoder storage padding as visible
+texture data. A dav1d AV1 480x360 picture with 512x384 storage then produces
+black right and bottom margins in offscreen stills.
+
+Negotiate the rotated visible rectangle as the software display format,
+with zero offsets, and let the existing converter consume the source crop.
+Keep decoder storage, its alignment, pool ownership and backpressure intact.
+Opaque MediaCodec, private ANW and the GL output retain their current paths.
+
+For a changed source crop, invalidate and recreate the display pool and
+converter together through the existing display reset protocol. Repeated
+crop notifications do not invalidate a pool. Propagate rotated pixel aspect
+without resizing storage. Keep the window's existing buffer pitch alignment.
+
+diff --git a/modules/video_output/android/display.c b/modules/video_output/android/display.c
+--- a/modules/video_output/android/display.c
++++ b/modules/video_output/android/display.c
+@@ -138,6 +138,9 @@
+ 
+     bool b_has_subpictures;
+ 
++    /* Source crop last applied by the public software output converter. */
++    ARect source_crop;
++
+     uint8_t hash[16];
+ };
+ 
+@@ -607,6 +610,33 @@
+             p_fmt->i_bmask = 0x00ff0000;
+             break;
+     }
++}
++
++static ARect SourceCrop(const video_format_t *fmt)
++{
++    return (ARect) {
++        fmt->i_x_offset, fmt->i_y_offset,
++        fmt->i_x_offset + fmt->i_visible_width,
++        fmt->i_y_offset + fmt->i_visible_height,
++    };
++}
++
++static void SetPublicSoftwareFormat(vout_display_t *vd)
++{
++    vout_display_sys_t *sys = vd->sys;
++    video_format_t source;
++    video_format_ApplyRotation(&source, &vd->source);
++
++    /* Public ANativeWindow has no crop API. Negotiate only the visible pixels
++     * for the display converter; the decoder keeps its padded pool and its
++     * ownership/backpressure contract. Offsets are consumed by the converter. */
++    vd->fmt.i_width = vd->fmt.i_visible_width = source.i_visible_width;
++    vd->fmt.i_height = vd->fmt.i_visible_height = source.i_visible_height;
++    vd->fmt.i_x_offset = vd->fmt.i_y_offset = 0;
++    vd->fmt.i_sar_num = source.i_sar_num;
++    vd->fmt.i_sar_den = source.i_sar_den;
++    sys->p_window->fmt = vd->fmt;
++    sys->source_crop = SourceCrop(&vd->source);
+ }
+ 
+ static int OpenCommon(vout_display_t *vd)
+@@ -694,8 +724,11 @@
+         goto error;
+ 
+     /* use software rotation if we don't use private anw */
+-    if (!sys->p_window->b_opaque && !sys->p_window->b_use_priv)
++    if (!sys->p_window->b_opaque && !sys->p_window->b_use_priv) {
+         video_format_TransformTo(&vd->fmt, ORIENT_NORMAL);
++        SetPublicSoftwareFormat(vd);
++        vd->info.has_pictures_invalid = true;
++    }
+ 
+     msg_Dbg(vd, "using %s", sys->p_window->b_opaque ? "opaque" :
+             (sys->p_window->b_use_priv ? "ANWP" : "ANW"));
+@@ -1166,7 +1199,25 @@
+     {
+         msg_Dbg(vd, "change source crop/aspect");
+ 
+-        if (query == VOUT_DISPLAY_CHANGE_SOURCE_CROP) {
++        if (vd->info.has_pictures_invalid) {
++            if (query == VOUT_DISPLAY_CHANGE_SOURCE_CROP) {
++                const ARect crop = SourceCrop(&vd->source);
++                if (crop.left != sys->source_crop.left
++                 || crop.top != sys->source_crop.top
++                 || crop.right != sys->source_crop.right
++                 || crop.bottom != sys->source_crop.bottom) {
++                    /* Recreate the display pool and converter together. Decoder
++                     * storage must not become a smaller surface's backing. */
++                    vout_display_SendEventPicturesInvalid(vd);
++                    return VLC_SUCCESS;
++                }
++            } else {
++                video_format_t source;
++                video_format_ApplyRotation(&source, &vd->source);
++                CopySourceAspect(&vd->fmt, &source);
++                CopySourceAspect(&sys->p_window->fmt, &source);
++            }
++        } else if (query == VOUT_DISPLAY_CHANGE_SOURCE_CROP) {
+             video_format_CopyCrop(&sys->p_window->fmt, &vd->source);
+             AndroidWindow_UpdateCrop(sys, sys->p_window);
+         } else
+@@ -1188,7 +1239,15 @@
+         return VLC_SUCCESS;
+     }
+     case VOUT_DISPLAY_RESET_PICTURES:
+-        vlc_assert_unreachable();
++        if (!vd->info.has_pictures_invalid)
++            vlc_assert_unreachable();
++        if (sys->pool != NULL) {
++            picture_pool_Release(sys->pool);
++            sys->pool = NULL;
++        }
++        SetPublicSoftwareFormat(vd);
++        FixSubtitleFormat(sys);
++        return VLC_SUCCESS;
+     default:
+         msg_Warn(vd, "Unknown request in android-display: %d", query);
+     case VOUT_DISPLAY_CHANGE_ZOOM:

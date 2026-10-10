@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-19 | `libvlc-lgpl-3.7.6-19` |
 | 3.7.6-17 | `libvlc-lgpl-3.7.6-17` |
 | 3.7.6-15 | `libvlc-lgpl-3.7.6-15` |
 | 3.7.6-14 | `libvlc-lgpl-3.7.6-14` |
@@ -204,6 +205,24 @@ later output starts unpaused and may discard the late first picture while the de
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
 the modules listed in `module_blacklist`.
+
+Closely spaced seeks could consume a new seek's first-picture state with output from the previous
+codec timeline, start its clock too early, and discard the actual target pictures as late:
+
+- `patches/vlc/0018-decoder-discard-obsolete-output-and-interrupt-mediacodec-drain-on-seek.patch`:
+  discard obsolete video, audio, subtitle and stream output while the FIFO-protected flush request is
+  pending; wake callbacks waiting on the old buffering cycle; let the decoder perform codec/output
+  flushes before accepting fresh output. MediaCodec checks pending flush/stop requests during input
+  queuing and EOS drain, polling every 20 ms only during drain while retaining the three-second deadline.
+
+Public Android software windows have no crop API. Coded storage padding, including dav1d's aligned
+AV1 buffers, therefore appeared as black margins in captured stills:
+
+- `patches/vlc/0019-android-display-crop-public-software-output-to-visible-pixels.patch`:
+  negotiate the rotated visible rectangle with zero offsets and let the existing display converter
+  consume the source crop. Preserve decoder storage, alignment, pool ownership and backpressure.
+  Reset the display pool and converter together when the source crop changes, and propagate rotated
+  pixel aspect without resizing storage. Opaque MediaCodec, private ANW and live GL paths are preserved.
 
 ## Build
 
