@@ -1,0 +1,69 @@
+From 8f07030ec4ee8206289d0403726da80a9b6c4e7d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 11 Oct 2026 10:43:30 +0900
+Subject: [PATCH] mediacodec: restore pre-0018 queue and drain for isolation
+
+Diagnostic comparison against native 3.7.6-22: reverse only the MediaCodec
+portion of patch 0018. Keep decoder core, decoder_IsFlushing API, and all
+later patches unchanged to isolate codec-side flush guards and EOS wait
+interruption. Restore the previous queue checks and three-second EOS wait.
+
+Native 19 also includes 0018 and passes the seven H.264 conditions failing
+22, so 0018 alone is not established as the cause. Its interaction with
+later patches remains unverified. This diagnostic is not an adopted fix.
+Compare backward-seek progression, end-of-stream surface recovery, HEVC
+first pictures and paused seek/resume, and TS/M2TS rapid seeks. Known core
+22 end-boundary failures may remain. Runtime testing follows the user's
+native build; no compilation has been performed during preparation.
+---
+ modules/codec/omxil/mediacodec.c | 19 ++-----------------
+ 1 file changed, 2 insertions(+), 17 deletions(-)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 17b004a..8263fe8 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -1464,10 +1464,6 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+     /* Queue CSD blocks and input blocks */
+     while (b_drain || (p_block = GetNextBlock(p_sys, p_in_block)))
+     {
+-        /* A pending seek discards this input instead of draining its pictures.
+-         * Let the decoder thread reach pf_flush before accepting new input. */
+-        if (decoder_IsFlushing(p_dec))
+-            return VLC_SUCCESS;
+         int i_index;
+ 
+         vlc_mutex_unlock(&p_sys->lock);
+@@ -1484,8 +1480,6 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+         bool b_config = false;
+         vlc_tick_t i_ts = 0;
+         p_sys->b_input_dequeued = true;
+-        if (decoder_IsFlushing(p_dec))
+-            return VLC_SUCCESS;
+         const void *p_buf = NULL;
+         size_t i_size = 0;
+ 
+@@ -1568,18 +1562,9 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
+          * behave correctly. */
+         vlc_tick_t deadline = mdate() + INT64_C(3000000);
+         while (!p_sys->b_aborted && !p_sys->b_drained
+-               && !decoder_IsFlushing(p_dec))
+-        {
+-            vlc_tick_t now = mdate();
+-            if (now >= deadline)
+-                break;
+-            /* The owner cannot signal this module's condition. Poll only while
+-             * draining, retaining the normal EOS deadline when no seek occurs. */
+-            vlc_cond_timedwait(&p_sys->dec_cond, &p_sys->lock,
+-                               __MIN(deadline, now + INT64_C(20000)));
+-        }
++            && vlc_cond_timedwait(&p_sys->dec_cond, &p_sys->lock, deadline) == 0);
+ 
+-        if (!p_sys->b_drained && !decoder_IsFlushing(p_dec))
++        if (!p_sys->b_drained)
+         {
+             msg_Err(p_dec, "OutThread timed out");
+             AbortDecoderLocked(p_dec);
+-- 
+2.55.0
+
