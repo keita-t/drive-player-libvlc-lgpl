@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-27 | `libvlc-lgpl-3.7.6-27` |
 | 3.7.6-19 | `libvlc-lgpl-3.7.6-19` |
 | 3.7.6-17 | `libvlc-lgpl-3.7.6-17` |
 | 3.7.6-15 | `libvlc-lgpl-3.7.6-15` |
@@ -34,7 +35,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 |---|---|
 | `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with Drive Player's patches applied |
 | `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and Drive Player's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
-| `sources/contrib/` | The source archives of the 24 third-party components linked into `libvlc.so`, as published by each project |
+| `sources/contrib/` | The source archives of the 27 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
 | `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
 | `third-party/libvlc/patches/` | Drive Player's modifications to libvlcjni and VLC, as `git am` patches |
@@ -137,12 +138,6 @@ can therefore retain the opaque output's initial square pixels:
   when updating an output whose input did not specify pixel aspect. A container's declared ratio
   remains authoritative.
 
-The Ogg identification header contains Theora's pixel aspect, which software decoding needs before
-its first output:
-
-- `patches/vlc/0010-ogg-retain-theora-pixel-aspect.patch`: retain the header's numerator and
-  denominator in the elementary stream format instead of discarding them.
-
 A video output learns a changed pixel aspect from the pictures it displays, and applies it to the
 window only after displaying them: the aspect it is opened with is the only one the window knows before
 the first picture. MediaCodec opened its opaque output at a provisional 1:1 before it knew the aspect of
@@ -206,15 +201,6 @@ Features the app does not use are also left out: stream output (transcoding, rec
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
 the modules listed in `module_blacklist`.
 
-Closely spaced seeks could consume a new seek's first-picture state with output from the previous
-codec timeline, start its clock too early, and discard the actual target pictures as late:
-
-- `patches/vlc/0018-decoder-discard-obsolete-output-and-interrupt-mediacodec-drain-on-seek.patch`:
-  discard obsolete video, audio, subtitle and stream output while the FIFO-protected flush request is
-  pending; wake callbacks waiting on the old buffering cycle; let the decoder perform codec/output
-  flushes before accepting fresh output. MediaCodec checks pending flush/stop requests during input
-  queuing and EOS drain, polling every 20 ms only during drain while retaining the three-second deadline.
-
 Public Android software windows have no crop API. Coded storage padding, including dav1d's aligned
 AV1 buffers, therefore appeared as black margins in captured stills:
 
@@ -223,6 +209,59 @@ AV1 buffers, therefore appeared as black margins in captured stills:
   consume the source crop. Preserve decoder storage, alignment, pool ownership and backpressure.
   Reset the display pool and converter together when the source crop changes, and propagate rotated
   pixel aspect without resizing storage. Opaque MediaCodec, private ANW and live GL paths are preserved.
+
+The OpenGL output's YUV to RGB matrices expand a limited-range source to full range. A full-range source,
+as MJPEG's pictures are, was expanded a second time, clipping its blacks and whites:
+
+- `patches/vlc/0025-opengl-convert-full-range-yuv-without-expanding-its-range-again.patch`: select the
+  full-range matrices of each colour space when the format states a full-range source.
+
+MediaCodec decoders are chosen by MIME type, and some hardware decoders accept input they cannot decode
+rightly. Each case is handed to the next decoder (FFmpeg) before any input is queued:
+
+- `patches/vlc/0026-mediacodec-hand-a-vp9-profile-the-codec-does-not-state-to-the-next-decoder.patch`:
+  read the first frame's VP9 profile and reload when the opened codec does not state it, as a codec
+  without 10/12-bit support does for Profile 2.
+- `patches/vlc/0030-mediacodec-hand-mpeg-4-part-2-with-b-vops-to-the-next-decoder.patch`: read the
+  video object layer's `low_delay` flag; a stream that allows B-VOPs is decoded by FFmpeg, since a
+  hardware decoder can output the previous reference picture in place of each B-VOP while stating the
+  Advanced Simple profile.
+
+A seek flushes the decoders, but a decoder thread flushes its module later, and a pending drain or a
+pause could leave a seek with no picture or no sound:
+
+- `patches/vlc/0027-decoder-drop-pictures-of-a-timeline-a-pending-flush-discards.patch`: discard the
+  pictures a module outputs from its own thread (MediaCodec) while the decoder is flushing, under the
+  owner lock, so a picture from before the seek is not taken as the first one after it.
+- `patches/vlc/0028-decoder-cancel-a-pending-drain-when-flushing.patch`: a flush cancels the drain the
+  end of the input asked for, so a seek back from near the end does not drain mid-timeline.
+- `patches/vlc/0029-input-demux-on-demand-while-a-paused-picture-s-decoder-starves.patch`: while paused,
+  demux one block at a time, every 5 ms, as long as a decoder that still owes a paused seek's picture
+  has consumed its input (`ES_OUT_GET_AWAITED_PICTURE`), as FFmpeg's frame threads and MediaCodec's
+  latency need.
+- `patches/vlc/0031-decoder-owe-a-seek-s-picture-to-a-decoder-paused-before-it-showed.patch`: a video
+  decoder flushed by a seek while playing, and paused before it showed a picture, shows the picture a
+  paused seek gets.
+- `patches/vlc/0034-audiotrack-keep-a-paused-output-paused-through-a-flush.patch`: Android's AudioTrack
+  output stays paused through a flush, so a paused seek does not sound what the device still held.
+
+Ogg is opened by libVLC's own demuxer, built with libvorbis to time Vorbis pages by. Several of its paths
+lost seeks or times:
+
+- `patches/vlc/0032-speex-flush-only-bits-that-were-initialized.patch`: the Speex decoder resets its bits
+  on a flush only once the headers initialized them; a seek before the first packet crashed.
+- `patches/vlc/0033-ogg-keep-the-logical-streams-at-the-physical-end-so-that-a-seek-back-finds-them.patch`:
+  at the end of a file the logical streams are kept, and their end state is reset on a seek, so seeks
+  after the end are not refused.
+- `patches/vlc/0035-oggseek-search-pages-for-a-time-before-estimating-from-the-bitrate.patch`: a single
+  audio stream is sought by searching its pages by granule; the estimate from the nominal bitrate of
+  Vorbis, Speex and FLAC is used only where searching cannot be done.
+- `patches/vlc/0036-ogg-time-flac-packets-by-their-frame-headers.patch`: FLAC packets, which Ogg times
+  only at the end of a page of up to a second, are timed by the samples their frame headers state, as
+  Vorbis, Opus and Speex packets are, including the first page after a seek.
+- `patches/vlc/0037-oggseek-read-to-the-end-when-probing-the-length.patch`: the length probe reads to
+  the end each time and takes the greatest granule, so a last page that starts before the bytes read is
+  found.
 
 ## Build
 
@@ -253,6 +292,10 @@ with platform 36 (`ANDROID_HOME` set):
     -Plibvlc.repository="$PWD/repository"
 ```
 
+The recipe also builds a variant for comparison, with `--env LIBVLC_VARIANT=ogg-avformat`: FFmpeg's
+demuxer opens Ogg instead of libVLC's, and libvorbis is not built. It uses the same sources; the app
+ships the default build.
+
 `build-native.sh` fetches the pinned libvlcjni and VLC commits and the component archives from their
 upstream locations. To build from this repository's copies instead:
 
@@ -273,7 +316,7 @@ license, found in its archive:
 |---|---|
 | GNU LGPL 2.1 or later | FFmpeg, libdvbpsi, libebml, libmatroska, GNU FriBidi, GNU libiconv, libplacebo, libsoxr, mpg123 |
 | BSD 2-Clause | dav1d, OpenJPEG |
-| BSD 3-Clause | libogg, libFLAC, Opus, Speex |
+| BSD 3-Clause | libogg, libvorbis, libtheora, libvpx, libFLAC, Opus, Speex |
 | MIT | HarfBuzz ("Old MIT"), libxml2 |
 | ISC | libass |
 | FreeType Project License | FreeType |

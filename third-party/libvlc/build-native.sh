@@ -25,18 +25,27 @@
 #    configured out (vlc_configure_args);
 #  - modules: upstream's exclusions plus the GPL-licensed and unused ones (module_blacklist), and
 #    the build stops if any module left declares the GPL;
-#  - patches/: the few source changes the LGPL-only result needs, the app's callback input needs,
+#  - patches/: the source changes the LGPL-only result needs, the app's callback input needs,
 #    and the app's track changes need (an output that plays a stream to its end before reporting it,
 #    a decoder made while its input is paused that waits paused, and the first PCM retained
 #    with the shared clock delayed when audio output initialization misses its deadline), and
 #    the surface lifecycle needs (cancelled initialization and callback thread teardown), and
 #    live video sizing needs (fresh input track formats after decoder initialization,
-#    Matroska display aspect ratios converted to pixel aspect in the stated direction,
-#    undeclared H.26x pixel aspect read from the current SPS by MediaCodec, and
-#    Theora pixel aspect retained by the Ogg header probe), and seek needs (obsolete output
-#    rejected during a pending flush and MediaCodec's EOS drain interrupted for that flush),
-#    and still sizing needs (public Android software output converted into the visible
-#    rectangle, retaining decoder storage alignment and pool ownership).
+#    Matroska display aspect ratios converted to pixel aspect in the stated direction, and
+#    undeclared H.26x pixel aspect read from the current SPS by MediaCodec), and seek needs
+#    (MPEG-PS and MPEG-TS sought to the picture at the time, the start-time seek made before
+#    pictures are demuxed, no picture of a timeline a flush discards, no drain left pending
+#    across a flush, demuxing on demand while a paused picture's decoder starves, and the
+#    picture a seek owes a decoder paused before showing it), and pause needs (pictures restored
+#    after the video output is replaced, and an AudioTrack kept paused through a flush), and Ogg
+#    needs (logical streams kept at the physical end, pages searched before a bitrate estimate,
+#    FLAC packets timed by their frame headers, the length read from the last page however long,
+#    and Speex flushed only once initialized), and device decoders need (a VP9 profile, or
+#    MPEG-4 Part 2 B-VOPs, that a MediaCodec codec cannot decode handed to the next decoder),
+#    and pictures need (full-range YUV converted once, and public Android software output
+#    converted into the visible rectangle, retaining decoder storage alignment and pool
+#    ownership).
+#  - the variant (LIBVLC_VARIANT, below): which demuxer opens Ogg.
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 
@@ -72,8 +81,12 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 #   ffmpeg (+ zlib, gsm, openjpeg, its own dependencies)  demuxing and decoding of most formats;
 #     built without encoders, muxers or network protocols
 #   dav1d                           AV1
-#   ogg opus flac speex             the Xiph formats; Vorbis and Theora are decoded by FFmpeg,
-#                                   because VLC's own modules for them also want the encoders
+#   ogg opus flac speex             the Xiph formats; vorbis is added by the variant (below)
+#   theora                          Theora, by VLC's module: FFmpeg's frame threads hold a picture
+#                                   until as many packets as threads followed it, which a Theora
+#                                   stream of repeated (empty) frames may never send before its end
+#   vpx                             VP8 / VP9, as upstream builds it; FFmpeg, ranked above it,
+#                                   decodes them, and VLC's module is the fallback
 #   mpg123                          MP3
 #   soxr                            audio resampling
 #   ebml matroska (+ utfcpp)        Matroska / WebM
@@ -86,7 +99,7 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 # instead of scanning every system font on first use.
 contrib_packages=(
     ass dav1d dvbpsi ebml ffmpeg flac freetype2 fribidi gsm harfbuzz iconv jpeg libplacebo
-    libxml2 matroska mpg123 ogg openjpeg opus png soxr speex utfcpp zlib
+    libxml2 matroska mpg123 ogg openjpeg opus png soxr speex theora utfcpp vpx zlib
 )
 
 # VLC's own configure switches. Everything that would need a contrib outside the list above is
@@ -109,17 +122,17 @@ vlc_configure_args=(
     --disable-sout --disable-lua --disable-taglib --disable-bluray --disable-dvdread
     --disable-dvdnav --disable-mod --disable-gme --disable-zvbi --disable-fluidlite
     --disable-smb2 --disable-live555
-    # Further features off: fontconfig (see contrib_packages), the codec modules whose formats
-    # FFmpeg decodes (vorbis, theora, vpx, aom), archives, discovery, remote access, TLS and
-    # credential stores, and the remaining encoders.
-    --disable-fontconfig --disable-vorbis --disable-theora --disable-vpx --disable-aom
+    # Further features off: fontconfig (see contrib_packages), the AV1 module of libaom (dav1d
+    # and FFmpeg decode AV1), archives, discovery, remote access, TLS and credential stores, and
+    # the remaining encoders. Vorbis is the variant's (below).
+    --disable-fontconfig --disable-aom
     --disable-archive --disable-upnp
     --disable-microdns --disable-nfs --disable-sftp --disable-spatialaudio --disable-gnutls
     --disable-libgcrypt --disable-secret --disable-kwallet --disable-avahi --disable-realrtsp
     --disable-addonmanagermodules --disable-shout --disable-twolame --disable-shine
     --disable-x264 --disable-kate --disable-tiger --disable-libcddb
     # The contribs above, required rather than detected.
-    --enable-dav1d --enable-flac --enable-speex --enable-ogg --enable-soxr
+    --enable-dav1d --enable-flac --enable-speex --enable-ogg --enable-theora --enable-vpx --enable-soxr
     --enable-freetype --enable-fribidi --enable-harfbuzz --enable-png --enable-libplacebo
 )
 
@@ -169,6 +182,35 @@ log() {
 die() {
     printf '\nERROR: %s\n' "$*" >&2
     exit 1
+}
+
+# The build variant, from the environment: ./local_build.sh sets it for a version named after it
+# (3.7.6-27-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-27). A variant changes
+# only which demuxer opens Ogg inputs, and with it how Vorbis is decoded:
+#   (none)        libVLC's own Ogg demuxer, which plays every link of a chained stream. It times
+#                 Vorbis pages through libvorbis, to seek by, so libvorbis and VLC's Vorbis
+#                 decoder are built.
+#   ogg-avformat  FFmpeg's demuxer (avformat) opens every Ogg input, whatever its codec or
+#                 declared type, and FFmpeg decodes Vorbis; libVLC's Ogg demuxer is left out.
+#                 A chained stream plays only its first link: FFmpeg's demuxer times each link
+#                 from zero and does not hand over a link whose settings change. Kept for the
+#                 comparison with libVLC's demuxer.
+readonly LIBVLC_VARIANT="${LIBVLC_VARIANT:-}"
+
+select_variant() {
+    case "$LIBVLC_VARIANT" in
+        "")
+            OGG_DEMUXER="libVLC's ogg"
+            contrib_packages+=(vorbis)
+            vlc_configure_args+=(--enable-vorbis)
+            ;;
+        ogg-avformat)
+            OGG_DEMUXER="FFmpeg's (avformat)"
+            vlc_configure_args+=(--disable-vorbis)
+            module_blacklist+=(ogg)
+            ;;
+        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none or ogg-avformat." ;;
+    esac
 }
 
 # Fetches exactly one commit, without history: the pins name commits, not branches.
@@ -463,7 +505,7 @@ collect_outputs() {
         name="$(basename "$source")"
         mkdir -p "$OUT_DIR/licenses/$name"
         find "$source" -maxdepth 1 -type f \
-            \( -iname 'COPYING*' -o -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYRIGHT*' -o -iname 'README*' -o -iname 'AUTHORS*' \) \
+            \( -iname 'COPYING*' -o -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYRIGHT*' -o -iname 'PATENTS*' -o -iname 'README*' -o -iname 'AUTHORS*' \) \
             -exec cp {} "$OUT_DIR/licenses/$name/" \;
     done
 }
@@ -484,7 +526,9 @@ write_build_info() {
         echo "VLC: $VLC_REPOSITORY @ $VLC_COMMIT ($(git -C "$VLC_DIR" describe --tags --always "$VLC_COMMIT" 2>/dev/null || echo "$VLC_COMMIT"))"
         echo "NDK: r$NDK_RELEASE ($ANDROID_NDK)"
         echo "ABI: $ANDROID_ABI, API $ANDROID_API"
-        echo "Patches: $(cd "$RECIPE_DIR/patches" && find . -name '*.patch' | sort | tr '\n' ' ')"
+        echo "Variant: ${LIBVLC_VARIANT:-none} (Ogg demuxer: $OGG_DEMUXER)"
+        # Match fetch_sources: retained diagnostic patches do not describe the compiled code.
+        echo "Patches: $(cd "$RECIPE_DIR/patches" && find ./libvlcjni ./vlc -maxdepth 1 -type f -name '*.patch' | sort | tr '\n' ' ')"
         echo "Contribs:"
         local package
         for package in "${contrib_packages[@]}"; do
@@ -502,6 +546,7 @@ main() {
     mkdir -p "$SRC_DIR" "$OUT_DIR" "$TARBALLS_DIR" "$WORK_DIR/home"
     export HOME="$WORK_DIR/home"
 
+    select_variant
     fetch_sources
     setup_toolchain
     build_tools

@@ -1,0 +1,38 @@
+From 518973f5cc5d0053bcfeeabd62ee3b8eba686649 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] decoder: cancel a pending drain when flushing
+
+At the end of its input, a decoder is asked to drain once its FIFO is
+empty. A seek that flushes the FIFO before then leaves the request pending,
+and the decoder drains as soon as its FIFO runs empty in the middle of the
+new timeline: MediaCodec outputs nothing after its end of stream, so a seek
+back from near the end showed no picture and played no sound.
+
+A flush discards the data the drain was for: clear the request with it. The
+input asks again at the end of the next timeline.
+---
+ src/input/decoder.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 302051d..78f6890 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -2226,6 +2226,13 @@ void input_DecoderFlush( decoder_t *p_dec )
+      * a row. */
+     p_owner->flushing = true;
+ 
++    /* A drain requested at the end of the data this flush discards is no
++     * longer due: the input requests one again at the end of the next
++     * timeline. Left pending, the decoder drains as soon as its FIFO runs
++     * empty in the middle of that timeline, which ends decoding there: a
++     * MediaCodec decoder outputs nothing after its end of stream. */
++    p_owner->b_draining = false;
++
+     /* Flush video/spu decoder when paused: increment frames_countdown in order
+      * to display one frame/subtitle */
+     if( p_owner->paused
+-- 
+2.55.0
+

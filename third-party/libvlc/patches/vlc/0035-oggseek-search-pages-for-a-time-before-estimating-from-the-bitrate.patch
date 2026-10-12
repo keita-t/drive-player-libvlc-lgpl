@@ -1,0 +1,60 @@
+From 3d82e9033b230a3de507bd78dc638523185ca022 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] oggseek: search pages for a time before estimating from the
+ bitrate
+
+A single audio stream with a bitrate in its header was sought by
+estimating the byte position from that bitrate, without searching the
+pages. Vorbis, Speex and FLAC state a nominal bitrate: the estimate lands
+far from the time on a variable-bitrate stream, and past the end of a small
+one. Search the pages by granule first, and estimate only where searching
+cannot be done.
+---
+ modules/demux/oggseek.c | 23 +++++++++++++----------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/modules/demux/oggseek.c b/modules/demux/oggseek.c
+index bf7d4ab..6851a6f 100644
+--- a/modules/demux/oggseek.c
++++ b/modules/demux/oggseek.c
+@@ -918,16 +918,6 @@ int Oggseek_BlindSeektoAbsoluteTime( demux_t *p_demux, logical_stream_t *p_strea
+         b_found = true;
+     }
+ 
+-    /* Or try to be smart with audio fixed bitrate streams */
+-    if ( !b_found && p_stream->fmt.i_cat == AUDIO_ES && p_sys->i_streams == 1
+-         && p_sys->i_bitrate && Ogg_GetKeyframeGranule( p_stream, 0xFF00FF00 ) == 0xFF00FF00 )
+-    {
+-        /* But only if there's no keyframe/preload requirements */
+-        /* FIXME: add function to get preload time by codec, ex: opus */
+-        i_lowerpos = i_time * p_sys->i_bitrate / INT64_C(8000000);
+-        b_found = true;
+-    }
+-
+     /* or search */
+     if ( !b_found && b_fastseek )
+     {
+@@ -938,6 +928,19 @@ int Oggseek_BlindSeektoAbsoluteTime( demux_t *p_demux, logical_stream_t *p_strea
+         b_found = ( i_lowerpos != -1 );
+     }
+ 
++    /* Or, where searching cannot be done, estimate from the bitrate. That is
++     * exact only for a constant bitrate: Vorbis, Speex and FLAC state a nominal
++     * one, from which a byte position can be far from the time, even past the
++     * end of a small file. */
++    if ( !b_found && p_stream->fmt.i_cat == AUDIO_ES && p_sys->i_streams == 1
++         && p_sys->i_bitrate && Ogg_GetKeyframeGranule( p_stream, 0xFF00FF00 ) == 0xFF00FF00 )
++    {
++        /* But only if there's no keyframe/preload requirements */
++        /* FIXME: add function to get preload time by codec, ex: opus */
++        i_lowerpos = i_time * p_sys->i_bitrate / INT64_C(8000000);
++        b_found = true;
++    }
++
+     if ( !b_found ) return -1;
+ 
+     if ( i_lowerpos < p_stream->i_data_start || i_upperpos > p_sys->i_total_bytes )
+-- 
+2.55.0
+

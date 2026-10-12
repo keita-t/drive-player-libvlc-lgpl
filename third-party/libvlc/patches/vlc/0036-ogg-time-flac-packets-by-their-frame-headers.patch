@@ -1,0 +1,137 @@
+From cad8d635c26dd6c3e1d0581df743d6544262f03f Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:32:13 +0900
+Subject: [PATCH] ogg: time FLAC packets by their frame headers
+
+Ogg times only the last packet of a page, and a FLAC page can hold a
+second of frames. The demuxer did not interpolate FLAC packets, and
+after a seek it did not time the first page backwards as it does Vorbis,
+Opus and Speex: that page was dropped, the clock started at the page's
+end, and the packetizer restarted from the page's last packet, stamped
+with the page's start. The audio came a second behind its clock and was
+dropped as late, so a seek played nothing.
+
+Read each packet's samples from its frame header, with the STREAMINFO
+the stream starts with, and time FLAC as the other Xiph audio codecs.
+---
+ modules/demux/ogg.c | 38 ++++++++++++++++++++++++++++++++++++++
+ modules/demux/ogg.h |  5 +++++
+ 2 files changed, 43 insertions(+)
+
+diff --git a/modules/demux/ogg.c b/modules/demux/ogg.c
+index 728618a..5a863ba 100644
+--- a/modules/demux/ogg.c
++++ b/modules/demux/ogg.c
+@@ -125,6 +125,7 @@ static int  Ogg_ReadPage     ( demux_t *, ogg_page * );
+ static void Ogg_UpdatePCR    ( demux_t *, logical_stream_t *, ogg_packet * );
+ static void Ogg_DecodePacket ( demux_t *, logical_stream_t *, ogg_packet * );
+ static unsigned Ogg_OpusPacketDuration( ogg_packet * );
++static unsigned Ogg_FlacPacketDuration( logical_stream_t *, ogg_packet * );
+ static void Ogg_SendOrQueueBlocks( demux_t *, logical_stream_t *, block_t * );
+ 
+ static void Ogg_CreateES( demux_t *p_demux );
+@@ -464,6 +465,7 @@ static int Demux( demux_t * p_demux )
+             if ( p_stream->fmt.i_codec == VLC_CODEC_OPUS ||
+                  p_stream->fmt.i_codec == VLC_CODEC_VORBIS ||
+                  p_stream->fmt.i_codec == VLC_CODEC_SPEEX ||
++                 p_stream->fmt.i_codec == VLC_CODEC_FLAC ||
+                  p_stream->fmt.i_cat == VIDEO_ES )
+             {
+                 assert( p_stream->prepcr.pp_blocks == NULL );
+@@ -567,6 +569,9 @@ static int Demux( demux_t * p_demux )
+                 case VLC_CODEC_OPUS:
+                     p_block->i_nb_samples = Ogg_OpusPacketDuration( &dumb_packet );
+                     break;
++                case VLC_CODEC_FLAC:
++                    p_block->i_nb_samples = Ogg_FlacPacketDuration( p_stream, &dumb_packet );
++                    break;
+ #ifdef HAVE_LIBVORBIS
+                 case VLC_CODEC_VORBIS:
+                 {
+@@ -597,6 +602,7 @@ static int Demux( demux_t * p_demux )
+                 case VLC_CODEC_SPEEX:
+                 case VLC_CODEC_OPUS:
+                 case VLC_CODEC_VORBIS:
++                case VLC_CODEC_FLAC:
+                     pagestamp -= CLOCK_FREQ * p_block->i_nb_samples / p_stream->f_rate;
+                     if ( pagestamp < 0 )
+                     {
+@@ -1162,6 +1168,16 @@ static void Ogg_UpdatePCR( demux_t *p_demux, logical_stream_t *p_stream,
+             p_stream->i_pcr = VLC_TICK_0 + sample * CLOCK_FREQ / p_stream->f_rate;
+             p_stream->i_pcr += p_ogg->i_nzpcr_offset;
+         }
++        else if( p_stream->fmt.i_codec == VLC_CODEC_FLAC &&
++                 p_stream->i_previous_granulepos > 0 &&
++                 ( i_duration =
++                     Ogg_FlacPacketDuration( p_stream, p_oggpacket ) ) > 0 )
++        {
++            p_oggpacket->granulepos = p_stream->i_previous_granulepos + i_duration;
++            p_stream->i_pcr = VLC_TICK_0 + Oggseek_GranuleToAbsTimestamp( p_stream,
++                                    p_stream->i_previous_granulepos, false );
++            p_stream->i_pcr += p_ogg->i_nzpcr_offset;
++        }
+         else if( p_stream->fmt.i_cat == VIDEO_ES && p_stream->i_pcr > VLC_TS_UNKNOWN )
+         {
+             p_stream->i_pcr += (CLOCK_FREQ / p_stream->f_rate);
+@@ -1596,6 +1612,21 @@ static void Ogg_DecodePacket( demux_t *p_demux,
+     Ogg_SendOrQueueBlocks( p_demux, p_stream, p_block );
+ }
+ 
++/* The samples of a FLAC frame, as its header states: Ogg times only the
++ * page's last packet, and a page can hold a second of frames. */
++static unsigned Ogg_FlacPacketDuration( logical_stream_t *p_stream,
++                                        ogg_packet *p_oggpacket )
++{
++    struct flac_header_info h;
++
++    if( !p_stream->special.flac.b_stream_info || p_oggpacket->bytes <= 0 )
++        return 0;
++    if( FLAC_ParseSyncInfo( p_oggpacket->packet, p_oggpacket->bytes,
++                            &p_stream->special.flac.stream_info, NULL, &h ) == 0 )
++        return 0;
++    return h.i_frame_length;
++}
++
+ static unsigned Ogg_OpusPacketDuration( ogg_packet *p_oggpacket )
+ {
+     return opus_frame_duration(p_oggpacket->packet, p_oggpacket->bytes);
+@@ -2939,6 +2970,13 @@ static bool Ogg_ReadFlacStreamInfo( demux_t *p_demux, logical_stream_t *p_stream
+         msg_Dbg( p_demux, "FLAC header, channels: %i, rate: %i",
+                  p_stream->fmt.audio.i_channels, (int)p_stream->f_rate );
+         if ( p_stream->f_rate == 0 ) return false;
++
++        if( p_oggpacket->bytes >= 4 + FLAC_STREAMINFO_SIZE )
++        {
++            FLAC_ParseStreamInfo( &p_oggpacket->packet[4],
++                                  &p_stream->special.flac.stream_info );
++            p_stream->special.flac.b_stream_info = true;
++        }
+     }
+     else
+     {
+diff --git a/modules/demux/ogg.h b/modules/demux/ogg.h
+index 9473cdb..6ee2cf4 100644
+--- a/modules/demux/ogg.h
++++ b/modules/demux/ogg.h
+@@ -30,6 +30,8 @@
+   #include <vorbis/codec.h>
+ #endif
+ 
++#include "../packetizer/flac.h"
++
+ /*****************************************************************************
+  * Definitions of structures and functions used by this plugin
+  *****************************************************************************/
+@@ -153,6 +155,9 @@ typedef struct logical_stream_s
+         struct
+         {
+             bool b_old;
++            /* From STREAMINFO, to read the frame headers by */
++            bool b_stream_info;
++            struct flac_stream_info stream_info;
+         } flac;
+     } special;
+ 
+-- 
+2.55.0
+

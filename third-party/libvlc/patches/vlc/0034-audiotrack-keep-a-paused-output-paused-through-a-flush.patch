@@ -1,0 +1,37 @@
+From 53bbbd0363ed01fd9a0663ac3f0abed462bdf6d0 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] audiotrack: keep a paused output paused through a flush
+
+Flush() played the track again after flushing it, paused or not. A seek
+while paused flushes the output, and the track then sounded what the device
+still held for a moment: a click. Play it again only when it is not paused;
+Pause() plays it when it resumes.
+---
+ modules/audio_output/audiotrack.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/modules/audio_output/audiotrack.c b/modules/audio_output/audiotrack.c
+index d45c614..7d7eee0 100644
+--- a/modules/audio_output/audiotrack.c
++++ b/modules/audio_output/audiotrack.c
+@@ -2100,8 +2100,14 @@ Flush( audio_output_t *p_aout, bool b_wait )
+         }
+     }
+     AudioTrack_Reset( env, p_aout );
+-    JNI_AT_CALL_VOID( play );
+-    CHECK_AT_EXCEPTION( "play" );
++    /* A paused output stays paused through a flush, as a seek while paused
++     * flushes it: Pause() plays it again when it resumes. Played here, the
++     * track sounds what the device still held for a moment while paused. */
++    if( !p_sys->b_thread_paused )
++    {
++        JNI_AT_CALL_VOID( play );
++        CHECK_AT_EXCEPTION( "play" );
++    }
+ 
+ bailout:
+     vlc_mutex_unlock( &p_sys->lock );
+-- 
+2.55.0
+

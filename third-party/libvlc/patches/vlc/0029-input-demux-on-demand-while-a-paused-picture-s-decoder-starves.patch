@@ -1,0 +1,206 @@
+From 0295d2f22929802d6953a2f60c44b3b2eaee9e57 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] input: demux on demand while a paused picture's decoder
+ starves
+
+Paused, the input stops demuxing as soon as buffering completes. A decoder
+that holds pictures until later input arrives - FFmpeg's frame threads,
+reordering, MediaCodec's latency - can need more input than buffering
+supplied before it outputs the picture a paused seek or a frame step asks
+for, and then waits for input the paused input never sends.
+
+Let a decoder say whether it still owes that picture and has consumed its
+input (ES_OUT_GET_AWAITED_PICTURE), and demux whenever it starves, checking
+every 5 ms until the picture is out or the input ends.
+---
+ src/input/decoder.c          | 22 ++++++++++++++++++++++
+ src/input/decoder.h          |  8 ++++++++
+ src/input/es_out.c           | 23 +++++++++++++++++++++++
+ src/input/es_out.h           | 11 +++++++++++
+ src/input/es_out_timeshift.c | 13 +++++++++++++
+ src/input/input.c            | 22 ++++++++++++++++++++++
+ 6 files changed, 99 insertions(+)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 78f6890..a4e1b6b 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -2397,6 +2397,28 @@ void input_DecoderStopWait( decoder_t *p_dec )
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
++bool input_DecoderAwaitsPausedPicture( decoder_t *p_dec, bool *pb_starving )
++{
++    decoder_owner_sys_t *p_owner = p_dec->p_owner;
++
++    *pb_starving = false;
++    if( p_owner->fmt.i_cat != VIDEO_ES )
++        return false;
++
++    vlc_mutex_lock( &p_owner->lock );
++    const bool b_error = p_owner->error;
++    vlc_mutex_unlock( &p_owner->lock );
++    if( b_error )
++        return false;
++
++    vlc_fifo_Lock( p_owner->p_fifo );
++    const bool b_awaits = p_owner->paused && p_owner->frames_countdown > 0;
++    *pb_starving = b_awaits && p_owner->b_idle && !p_owner->flushing
++                && vlc_fifo_IsEmpty( p_owner->p_fifo );
++    vlc_fifo_Unlock( p_owner->p_fifo );
++    return b_awaits;
++}
++
+ void input_DecoderWait( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+diff --git a/src/input/decoder.h b/src/input/decoder.h
+index 5b39e3e..4b66f96 100644
+--- a/src/input/decoder.h
++++ b/src/input/decoder.h
+@@ -63,6 +63,14 @@ void input_DecoderStopWait( decoder_t * );
+  */
+ bool input_DecoderIsEmpty( decoder_t * );
+ 
++/**
++ * Whether a paused video decoder still owes the picture a paused seek or a
++ * frame step asked for, and in *pb_starving whether it has consumed all its
++ * input meanwhile. A decoder holding pictures until later input arrives
++ * (frame threads, reordering, hardware latency) then needs more of it.
++ */
++bool input_DecoderAwaitsPausedPicture( decoder_t *, bool *pb_starving );
++
+ /**
+  * This function activates the request closed caption channel.
+  */
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index c8331bf..ed4f970 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -2777,6 +2777,29 @@ static int EsOutControlLocked( es_out_t *out, int i_query, va_list args )
+         return VLC_SUCCESS;
+     }
+ 
++    case ES_OUT_GET_AWAITED_PICTURE:
++    {
++        bool *pb_awaits = va_arg( args, bool* );
++        bool *pb_starving = va_arg( args, bool* );
++
++        *pb_awaits = *pb_starving = false;
++        if( p_sys->b_buffering )
++            return VLC_SUCCESS;
++        for( int i = 0; i < p_sys->i_es; i++ )
++        {
++            es_out_id_t *es = p_sys->es[i];
++            bool b_starving;
++
++            if( es->p_dec != NULL
++             && input_DecoderAwaitsPausedPicture( es->p_dec, &b_starving ) )
++            {
++                *pb_awaits = true;
++                *pb_starving |= b_starving;
++            }
++        }
++        return VLC_SUCCESS;
++    }
++
+     case ES_OUT_SET_DELAY:
+     {
+         const int i_cat = va_arg( args, int );
+diff --git a/src/input/es_out.h b/src/input/es_out.h
+index f37f894..3f33303 100644
+--- a/src/input/es_out.h
++++ b/src/input/es_out.h
+@@ -88,6 +88,9 @@ enum es_out_query_private_e
+ 
+     /* Set End Of Stream */
+     ES_OUT_SET_EOS,                                 /* res=cannot fail */
++
++    /* Get whether a paused video decoder awaits a picture, and starves */
++    ES_OUT_GET_AWAITED_PICTURE,                     /* arg1=bool *pb_awaits arg2=bool *pb_starving res=cannot fail */
+ };
+ 
+ static inline void es_out_SetMode( es_out_t *p_out, int i_mode )
+@@ -119,6 +122,14 @@ static inline bool es_out_GetEmpty( es_out_t *p_out )
+     assert( !i_ret );
+     return b;
+ }
++static inline bool es_out_GetAwaitedPicture( es_out_t *p_out, bool *pb_starving )
++{
++    bool b;
++    int i_ret = es_out_Control( p_out, ES_OUT_GET_AWAITED_PICTURE, &b, pb_starving );
++
++    assert( !i_ret );
++    return b;
++}
+ static inline void es_out_SetDelay( es_out_t *p_out, int i_cat, vlc_tick_t i_delay )
+ {
+     int i_ret = es_out_Control( p_out, ES_OUT_SET_DELAY, i_cat, i_delay );
+diff --git a/src/input/es_out_timeshift.c b/src/input/es_out_timeshift.c
+index 877706c..13d7929 100644
+--- a/src/input/es_out_timeshift.c
++++ b/src/input/es_out_timeshift.c
+@@ -693,6 +693,19 @@ static int ControlLocked( es_out_t *p_out, int i_query, va_list args )
+         bool *pb_buffering = (bool *)va_arg( args, bool* );
+         return ControlLockedGetBuffering( p_out, pb_buffering );
+     }
++    case ES_OUT_GET_AWAITED_PICTURE:
++    {
++        bool *pb_awaits = (bool *)va_arg( args, bool* );
++        bool *pb_starving = (bool *)va_arg( args, bool* );
++
++        /* Delayed, the decoders are fed from the timeshift buffer. */
++        if( p_sys->b_delayed )
++        {
++            *pb_awaits = *pb_starving = false;
++            return VLC_SUCCESS;
++        }
++        return es_out_Control( p_sys->p_out, ES_OUT_GET_AWAITED_PICTURE, pb_awaits, pb_starving );
++    }
+     case ES_OUT_SET_PAUSE_STATE:
+     {
+         const bool b_source_paused = (bool)va_arg( args, int );
+diff --git a/src/input/input.c b/src/input/input.c
+index 081d267..ea64913 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -59,6 +59,10 @@
+ /* How often the end of the stream checks whether the decoders have drained. */
+ #define INPUT_EOF_DRAIN_SLEEP (CLOCK_FREQ/100)
+ 
++/* How often a paused input checks whether a decoder starves for the picture a
++ * paused seek or a frame step awaits. */
++#define INPUT_PAUSED_PICTURE_SLEEP (CLOCK_FREQ/200)
++
+ /*****************************************************************************
+  * Local prototypes
+  *****************************************************************************/
+@@ -786,6 +790,24 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
+                 i_intf_update = now + INT64_C(250000);
+             }
+         }
++        else if( b_can_demux && !input_priv(p_input)->master->b_eof )
++        {
++            /* Paused, buffering stopped the demuxer. A paused seek or a frame
++             * step may still await its picture from a decoder holding pictures
++             * until later input arrives (frame threads, reordering, hardware
++             * latency): demux on demand while that decoder starves. */
++            bool b_starving;
++            if( es_out_GetAwaitedPicture( input_priv(p_input)->p_es_out,
++                                          &b_starving ) )
++            {
++                if( b_starving )
++                {
++                    bool b_force_update = false;
++                    MainLoopDemux( p_input, &b_force_update );
++                }
++                i_wakeup = mdate() + INPUT_PAUSED_PICTURE_SLEEP;
++            }
++        }
+ 
+         /* Handle control */
+         for( ;; )
+-- 
+2.55.0
+

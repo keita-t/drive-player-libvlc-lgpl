@@ -1,0 +1,106 @@
+From 37280a9a6fe1aeb45a6b063db4af58dd1fabd8e0 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] decoder: drop pictures of a timeline a pending flush discards
+
+input_DecoderFlush() only marks a decoder flushing; its thread flushes the
+module later. A module that outputs from a thread of its own (MediaCodec)
+can queue a picture decoded before the seek in between. Taken as the first
+picture of the new timeline, it ended the buffering wait, used the one
+picture a paused seek is owed (frames_countdown), and stayed on screen
+while the paused decoder stopped before decoding the sought picture.
+
+Discard pictures while the decoder is flushing, checked with the owner lock
+held, so that no wait for a seek starts in between.
+---
+ src/input/decoder.c | 45 +++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 33d7f4b..302051d 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -765,6 +765,20 @@ void decoder_AbortPictures( decoder_t *p_dec, bool b_abort )
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
++/* Whether a seek discarded the timeline the pictures being output belong to:
++ * from input_DecoderFlush() until the decoder thread flushed its module. A
++ * module outputting from a thread of its own (MediaCodec) can still queue a
++ * picture decoded before the seek in that time. */
++static bool DecoderIsFlushingLocked( decoder_owner_sys_t *p_owner )
++{
++    vlc_assert_locked( &p_owner->lock );
++
++    vlc_fifo_Lock( p_owner->p_fifo );
++    bool flushing = p_owner->flushing;
++    vlc_fifo_Unlock( p_owner->p_fifo );
++    return flushing;
++}
++
+ static void DecoderWaitUnblock( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+@@ -1065,6 +1079,16 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     /* */
+     vlc_mutex_lock( &p_owner->lock );
+ 
++    /* A picture of a timeline a seek discarded must not count for the next
++     * one: neither as its buffered data, nor as its first picture, nor as the
++     * one picture a paused seek shows. Taken for that, it is shown instead of
++     * the requested one, and the paused decoder stops before decoding it. */
++    if( DecoderIsFlushingLocked( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        goto discard;
++    }
++
+     if( p_owner->b_waiting && !p_owner->b_first )
+     {
+         p_owner->b_has_data = true;
+@@ -1074,6 +1098,13 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+ 
+     DecoderWaitUnblock( p_dec );
+ 
++    /* The wait releases the lock, and a seek may have come meanwhile. */
++    if( DecoderIsFlushingLocked( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        goto discard;
++    }
++
+     if( p_owner->b_waiting )
+     {
+         assert( p_owner->b_first );
+@@ -1087,11 +1118,15 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     DecoderFixTs( p_dec, &p_picture->date, NULL, NULL,
+                   &i_rate, DECODER_BOGUS_VIDEO_DELAY );
+ 
+-    vlc_mutex_unlock( &p_owner->lock );
+-
+-    /* FIXME: The *input* FIFO should not be locked here. This will not work
+-     * properly if/when pictures are queued asynchronously. */
++    /* Still under the lock, so that no wait starts for a seek coming now. A
++     * seek flushing the decoder since the check above discards the picture. */
+     vlc_fifo_Lock( p_owner->p_fifo );
++    if( unlikely(p_owner->flushing) )
++    {
++        vlc_fifo_Unlock( p_owner->p_fifo );
++        vlc_mutex_unlock( &p_owner->lock );
++        goto discard;
++    }
+     if( unlikely(p_owner->paused) && likely(p_owner->frames_countdown > 0) )
+     {
+         /* Buffering may have stopped waiting before this paused seek/step
+@@ -1101,6 +1136,8 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+     }
+     vlc_fifo_Unlock( p_owner->p_fifo );
+ 
++    vlc_mutex_unlock( &p_owner->lock );
++
+     /* */
+     if( p_vout == NULL )
+         goto discard;
+-- 
+2.55.0
+

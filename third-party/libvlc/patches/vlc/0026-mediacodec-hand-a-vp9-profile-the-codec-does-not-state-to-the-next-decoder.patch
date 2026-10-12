@@ -1,0 +1,136 @@
+From 2d831fafa93e2d3355378614703c426c4cc48fbe Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] mediacodec: hand a VP9 profile the codec does not state to
+ the next decoder
+
+A VP9 decoder is chosen by MIME type alone, so a codec without 10/12-bit
+support was handed a Profile 2 stream: it failed only after consuming
+input, and the decoder that took over started at the next key frame with a
+broken picture. Map the platform's VP9 profile constants to the bitstream
+profiles, read the first frame's profile, and when the opened codec does not
+state it, reload before queueing anything: the core keeps the block for the
+next decoder.
+---
+ modules/codec/omxil/mediacodec.c     | 48 ++++++++++++++++++++++++++++
+ modules/codec/omxil/mediacodec_jni.c | 24 ++++++++++++++
+ 2 files changed, 72 insertions(+)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 8263fe8..3fccf25 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -108,6 +108,8 @@ struct decoder_sys_t
+     /* The opaque output and MediaCodec wait for the first block, to open the
+      * output with the aspect it states; see OpenDecoder. */
+     bool            b_start_on_first_block;
++    /* The first VP9 frame's profile was checked against the codec. */
++    bool            b_vp9_profile_checked;
+     int             i_decode_flags;
+ 
+     union
+@@ -143,6 +145,9 @@ struct decoder_sys_t
+  *****************************************************************************/
+ static int  OpenDecoderJni(vlc_object_t *);
+ static int  OpenDecoderNdk(vlc_object_t *);
++
++char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
++                         int profile, int *p_quirks);
+ static void CleanDecoder(decoder_t *);
+ static void CloseDecoder(vlc_object_t *);
+ 
+@@ -1579,6 +1584,28 @@ error:
+     return VLC_EGENERIC;
+ }
+ 
++/* The profile a VP9 frame's uncompressed header states, or -1 when the block
++ * does not start with a frame. A superframe starts with its first frame. */
++static int VP9_GetProfile(const block_t *p_block)
++{
++    if (p_block->i_buffer < 1 || (p_block->p_buffer[0] >> 6) != 0x2)
++        return -1;
++    return ((p_block->p_buffer[0] >> 5) & 0x1) | (((p_block->p_buffer[0] >> 4) & 0x1) << 1);
++}
++
++/* Whether the opened codec states [profile] among its capabilities. */
++static bool CodecSupportsProfile(decoder_t *p_dec, int profile)
++{
++    decoder_sys_t *p_sys = p_dec->p_sys;
++    int quirks = 0;
++    char *name = MediaCodec_GetName(VLC_OBJECT(p_dec), p_sys->api.psz_mime,
++                                    profile, &quirks);
++    bool supported = name != NULL && p_sys->api.psz_name != NULL
++                  && strcmp(name, p_sys->api.psz_name) == 0;
++    free(name);
++    return supported;
++}
++
+ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -1626,6 +1653,27 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         goto reload;
+     }
+ 
++    /* A VP9 decoder is chosen by MIME type alone: the stream's profile is
++     * unknown when it opens, and a codec that cannot decode a 10/12-bit
++     * profile fails only after consuming input, losing the pictures before
++     * the next key frame. Check the first frame's profile against the codec
++     * and hand an unsupported stream to the next decoder before queueing
++     * anything: the core keeps this block for it. */
++    if (p_dec->fmt_in.i_codec == VLC_CODEC_VP9 && !p_sys->b_vp9_profile_checked)
++    {
++        const int i_vp9_profile = VP9_GetProfile(p_in_block);
++        if (i_vp9_profile >= 0)
++        {
++            p_sys->b_vp9_profile_checked = true;
++            if (i_vp9_profile >= 2 && !CodecSupportsProfile(p_dec, i_vp9_profile))
++            {
++                msg_Warn(p_dec, "%s does not decode VP9 profile %d",
++                         p_sys->api.psz_name, i_vp9_profile);
++                goto reload;
++            }
++        }
++    }
++
+     /* Parse input block */
+     if ((i_ret = p_sys->pf_on_new_block(p_dec, &p_in_block)) != 1)
+     {
+diff --git a/modules/codec/omxil/mediacodec_jni.c b/modules/codec/omxil/mediacodec_jni.c
+index a9721c1..cff296f 100644
+--- a/modules/codec/omxil/mediacodec_jni.c
++++ b/modules/codec/omxil/mediacodec_jni.c
+@@ -463,6 +463,30 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
+                                     break;
+                             }
+                         }
++                        else if (strcmp(psz_mime, "video/x-vnd.on2.vp9") == 0)
++                        {
++                            /* The bitstream profile: 0 and 1 are 8-bit, 2 and 3
++                             * are 10/12-bit, with their HDR variants. */
++                            switch (omx_profile)
++                            {
++                                case 0x1: /* VP9Profile0 */
++                                    codec_profile = 0;
++                                    break;
++                                case 0x2: /* VP9Profile1 */
++                                    codec_profile = 1;
++                                    break;
++                                case 0x4:    /* VP9Profile2 */
++                                case 0x1000: /* VP9Profile2HDR */
++                                case 0x4000: /* VP9Profile2HDR10Plus */
++                                    codec_profile = 2;
++                                    break;
++                                case 0x8:    /* VP9Profile3 */
++                                case 0x2000: /* VP9Profile3HDR */
++                                case 0x8000: /* VP9Profile3HDR10Plus */
++                                    codec_profile = 3;
++                                    break;
++                            }
++                        }
+                         if (codec_profile != profile)
+                             continue;
+                         /* Some encoders set the level too high, thus we ignore it for the moment.
+-- 
+2.55.0
+

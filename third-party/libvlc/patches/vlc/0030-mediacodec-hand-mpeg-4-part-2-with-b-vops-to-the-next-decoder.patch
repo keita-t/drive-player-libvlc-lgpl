@@ -1,0 +1,104 @@
+From 057d7bfd1ce8ebc0db99feeac4cc14010290a612 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 12 Oct 2026 18:01:06 +0900
+Subject: [PATCH] mediacodec: hand MPEG-4 Part 2 with B-VOPs to the next
+ decoder
+
+A hardware MPEG-4 Part 2 decoder can accept B-VOPs and output the previous
+reference picture in their place while stating the Advanced Simple profile
+(OMX.qcom.video.decoder.mpeg4 on sdm660): a third of the pictures play,
+each for three frames, and nothing reports it. Read the video object
+layer's low_delay flag from the extra data or the first block, and hand a
+stream that allows B-VOPs to the next decoder before queueing anything.
+---
+ modules/codec/omxil/mediacodec.c | 60 ++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 3fccf25..5d61e33 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -110,6 +110,8 @@ struct decoder_sys_t
+     bool            b_start_on_first_block;
+     /* The first VP9 frame's profile was checked against the codec. */
+     bool            b_vp9_profile_checked;
++    /* The MPEG-4 Part 2 video object layer was checked for B-VOPs. */
++    bool            b_mp4v_delay_checked;
+     int             i_decode_flags;
+ 
+     union
+@@ -1593,6 +1595,38 @@ static int VP9_GetProfile(const block_t *p_block)
+     return ((p_block->p_buffer[0] >> 5) & 0x1) | (((p_block->p_buffer[0] >> 4) & 0x1) << 1);
+ }
+ 
++/* Whether an MPEG-4 Part 2 video object layer header in [p, p + i_size) states
++ * a low delay stream, one without B-VOPs: false in *pb_found without one. As
++ * ISO/IEC 14496-2 6.3.3, a header without vol_control_parameters is low delay
++ * for the Simple and Advanced Simple object types. */
++static bool MP4V_IsLowDelay(const uint8_t *p, size_t i_size, bool *pb_found)
++{
++    *pb_found = false;
++    for (size_t i = 0; i + 4 < i_size; i++)
++    {
++        if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != 1 || (p[i + 3] & 0xf0) != 0x20)
++            continue;
++
++        bs_t s;
++        bs_init(&s, &p[i + 4], i_size - i - 4);
++        bs_skip(&s, 1);                         /* random_accessible_vol */
++        const unsigned i_type = bs_read(&s, 8); /* video_object_type_indication */
++        if (bs_read1(&s))                       /* is_object_layer_identifier */
++            bs_skip(&s, 7);
++        if (bs_read(&s, 4) == 0xf)              /* aspect_ratio_info: extended */
++            bs_skip(&s, 16);
++        bool b_low_delay = i_type == 0x01 || i_type == 0x11;
++        if (bs_read1(&s))                       /* vol_control_parameters */
++        {
++            bs_skip(&s, 2);                     /* chroma_format */
++            b_low_delay = bs_read1(&s);
++        }
++        *pb_found = !bs_eof(&s);
++        return b_low_delay;
++    }
++    return true;
++}
++
+ /* Whether the opened codec states [profile] among its capabilities. */
+ static bool CodecSupportsProfile(decoder_t *p_dec, int profile)
+ {
+@@ -1674,6 +1708,32 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
++    /* A hardware MPEG-4 Part 2 decoder can accept B-VOPs and output the
++     * previous reference picture in their place, while stating the Advanced
++     * Simple profile (OMX.qcom.video.decoder.mpeg4 on sdm660): a third of
++     * the pictures play, each for three frames. Hand a stream whose video
++     * object layer allows B-VOPs to the next decoder before queueing
++     * anything: the core keeps this block for it. */
++    if (p_dec->fmt_in.i_codec == VLC_CODEC_MP4V && !p_sys->b_mp4v_delay_checked)
++    {
++        bool b_found;
++        bool b_low_delay = MP4V_IsLowDelay(p_dec->fmt_in.p_extra,
++                                           p_dec->fmt_in.i_extra, &b_found);
++        if (!b_found)
++            b_low_delay = MP4V_IsLowDelay(p_in_block->p_buffer,
++                                          p_in_block->i_buffer, &b_found);
++        if (b_found)
++        {
++            p_sys->b_mp4v_delay_checked = true;
++            if (!b_low_delay)
++            {
++                msg_Warn(p_dec, "MPEG-4 Part 2 with B-VOPs is not decoded by %s",
++                         p_sys->api.psz_name);
++                goto reload;
++            }
++        }
++    }
++
+     /* Parse input block */
+     if ((i_ret = p_sys->pf_on_new_block(p_dec, &p_in_block)) != 1)
+     {
+-- 
+2.55.0
+

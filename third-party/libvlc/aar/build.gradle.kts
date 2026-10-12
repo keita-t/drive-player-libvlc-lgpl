@@ -8,6 +8,9 @@ plugins {
 val nativeOutput: File = file(providers.gradleProperty("libvlc.nativeOutput").get())
 val repository: File = file(providers.gradleProperty("libvlc.repository").get())
 val coordinates = libs.libvlc.lgpl.get()
+// Given for a variant of the recipe (build-native.sh, LIBVLC_VARIANT), which is published as a
+// version of its own: the catalog's, suffixed with the variant.
+val variant: String? = providers.gradleProperty("libvlc.variant").orNull
 
 android {
     // The bindings' own package: their sources import org.videolan.BuildConfig and org.videolan.R.
@@ -66,7 +69,7 @@ publishing {
         register<MavenPublication>("release") {
             groupId = coordinates.module.group
             artifactId = coordinates.module.name
-            version = coordinates.versionConstraint.requiredVersion
+            version = coordinates.versionConstraint.requiredVersion + variant?.let { "-$it" }.orEmpty()
             afterEvaluate {
                 from(components["release"])
             }
