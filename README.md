@@ -47,221 +47,104 @@ files are used unchanged.
 
 ## What was changed, and why
 
-The libVLC published by VideoLAN on Maven Central (`org.videolan.android:libvlc-all`) statically links
-components under the GNU General Public License. This build leaves every such component out:
+This build differs from the libVLC VideoLAN publishes on Maven Central (`org.videolan.android:libvlc-all`) in three
+ways: it contains no component under the GNU General Public License, it leaves out what the app does not use, and
+it carries source patches for behaviour the app relies on.
 
-- Third-party components are selected by an explicit list (`contrib_packages` in `build-native.sh`), and
-  VLC's contrib system is run with its GPL and GPLv3 guards on. FFmpeg's configuration is checked to have
-  its GPL, version 3 and non-free parts disabled.
-- VLC modules that declare the GPL are not linked (`module_blacklist`), and the build stops if any
-  linked module declares it.
-- `patches/libvlcjni/0001-build-the-bindings-without-the-renderer-discoverer.patch`: the renderer
-  discoverer's JNI part is removed, because `RendererDiscoverer.java` is published under the GPL. The AAR
-  build leaves that Java file out of the packaged sources.
-- `patches/vlc/0001-deinterlace-build-without-the-yadif-algorithm.patch`: the yadif algorithm, whose
-  sources are published under the GPL, is removed from the deinterlace module.
+### Left out
 
-Two further patches let the app serve a media's bytes through callbacks instead of a file descriptor
-it answers itself. Such a descriptor (Android's proxy file descriptor) cannot be torn down when the
-app's process is killed while libVLC waits on a read, and keeps a CPU core busy until the device
-restarts:
+| What | How the build ensures it |
+|---|---|
+| Third-party components under the GPL | Components are chosen from an explicit list (`contrib_packages` in `build-native.sh`), and VLC's contrib system runs with its GPL and GPLv3 guards on. FFmpeg's configuration is checked to have its GPL, version 3 and non-free parts disabled. |
+| VLC modules under the GPL | They are not linked (`module_blacklist`), and the build stops if any linked module declares the GPL. |
+| GPL sources inside LGPL code | The renderer discoverer of the Java bindings and the yadif deinterlacing algorithm are removed (License patches below). |
+| Features the app does not use | Stream output (transcoding, recording, casting), network access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and the modules listed in `module_blacklist`. |
 
-- `patches/libvlcjni/0002-add-a-media-read-through-java-callbacks.patch`: `org.videolan.libvlc.MediaInput`
-  and a `Media` constructor that reads through it (`libvlc_media_new_callbacks`).
-- `patches/vlc/0002-imem-access-report-seekable-callbacks-as-fast-seekable.patch`: a callback input that
-  answers seeks is read like a file, rather than through the prefetch filter's large background reads.
+### Patches
 
-Two more keep the end of every track when the app moves on to the next one. VLC's Android audio output
-ended its drain once it had written the audio to the `AudioTrack`; what the `AudioTrack` still held (twice
-the device's minimum buffer, some 100 ms) was then discarded by the pause at the end of the media and by
-the output's release:
+`patches/libvlcjni/` is applied to libvlcjni, and `patches/vlc/` to VLC after the patches libvlcjni itself carries,
+all with `git am`. Each patch's message describes its change in full. Numbers missing from the series were removed
+or not adopted: 0010 and 0018 are in the tags of earlier versions, and 0020-0024, never built, in this
+repository's history.
 
-- `patches/vlc/0003-audiotrack-drain-until-the-written-audio-has-been-pl.patch`: the drain waits until the
-  `AudioTrack`'s playback head has reached the frames written, bounded by the time they take and 200 ms.
-- `patches/vlc/0004-input-check-for-drained-decoders-at-the-end-more-oft.patch`: at the end of a stream the
-  input checks for drained decoders every 10 ms rather than every 100 ms, so the end is reported as soon
-  as the audio has been played.
+#### License
 
-One more lets the app open the next track ahead of time and hold it before its first sound
-(`start-paused`), whatever its format. Pausing an input paused the decoders it had, but a decoder made
-afterwards started unpaused. Ogg's demuxer finds its streams in the first data pages, after such an
-input has paused, so an Ogg track (Vorbis, Opus) played the start it had buffered while it waited:
+| Patch | Problem | Change |
+|---|---|---|
+| [`libvlcjni/0001`](third-party/libvlc/patches/libvlcjni/0001-build-the-bindings-without-the-renderer-discoverer.patch) | The renderer discoverer, `RendererDiscoverer.java`, is published under the GPL. | Its JNI part is removed, and the AAR build leaves the Java file out of the packaged sources. |
+| [`vlc/0001`](third-party/libvlc/patches/vlc/0001-deinterlace-build-without-the-yadif-algorithm.patch) | The yadif deinterlacing algorithm is published under the GPL. | yadif is removed from the deinterlace module. |
 
-- `patches/vlc/0005-es_out-start-a-decoder-made-while-the-input-is-pause.patch`: a decoder made while the
-  input is paused starts paused, as `input_DecoderChangePause`'s FIXME describes for a track added while
-  paused.
+#### Reading media through the app
 
-Audio output initialization can miss the converted deadline of the first PCM buffer. The
-original late-buffer policy then discarded the beginning of the media before the output had played
-anything:
+| Patch | Problem | Change |
+|---|---|---|
+| [`libvlcjni/0002`](third-party/libvlc/patches/libvlcjni/0002-add-a-media-read-through-java-callbacks.patch) | The app answered reads through a file descriptor of its own (Android's proxy file descriptor). Such a descriptor cannot be torn down when the app's process is killed while libVLC waits on a read, and keeps a CPU core busy until the device restarts. | `org.videolan.libvlc.MediaInput`, and a `Media` constructor that reads through its Java callbacks (`libvlc_media_new_callbacks`). |
+| [`vlc/0002`](third-party/libvlc/patches/vlc/0002-imem-access-report-seekable-callbacks-as-fast-seekable.patch) | A callback input was read through the prefetch filter's large background reads. | A callback input that answers seeks is read like a file (fast-seekable). |
 
-- `patches/vlc/0006-retain-pcm-at-delayed-audio-start.patch`: retain and retime the first buffer after
-  output creation, restart or flush, and delay the shared input clock using its original stream
-  timestamp. Pause is accounted for under the clock lock, and a flushing decoder does not rebase a
-  seek from an in-flight buffer. Ordinary late buffers during playback retain the original drop policy.
+#### Audio
 
-Detaching views can race the Java binding's internal texture initialization. The texture and its
-Surface were published separately, so release could dereference a not-yet-constructed Surface;
-unattached callback loopers were also left alive:
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0003`](third-party/libvlc/patches/vlc/0003-audiotrack-drain-until-the-written-audio-has-been-pl.patch) | The Android output ended its drain once the audio was written to the `AudioTrack`. What the track still held, some 100 ms, was cut by the pause at the end of the media and by the output's release. | The drain waits until the playback head reaches the frames written, bounded by the time they take and 200 ms. |
+| [`vlc/0004`](third-party/libvlc/patches/vlc/0004-input-check-for-drained-decoders-at-the-end-more-oft.patch) | The end of a stream was noticed up to 100 ms after its decoders drained. | The input checks for drained decoders every 10 ms. |
+| [`vlc/0006`](third-party/libvlc/patches/vlc/0006-retain-pcm-at-delayed-audio-start.patch) | When audio output initialization missed the first PCM buffer's deadline, the late-buffer policy discarded the start of the media before anything played. | The first buffer after the output is created, restarted or flushed is kept and retimed, and the shared input clock is delayed with it, accounting for pause and flushing. Later late buffers keep the original drop policy. |
+| [`vlc/0034`](third-party/libvlc/patches/vlc/0034-audiotrack-keep-a-paused-output-paused-through-a-flush.patch) | A seek while paused flushed the `AudioTrack` output and played it again, sounding what the device still held: a click. | The output stays paused through a flush. |
 
-- `patches/libvlcjni/0003-cancel-surface-initialization-on-view-release.patch`: publish both resources
-  together, cancel pending initialization on detach, keep old waiters from acquiring a new
-  attachment's resources, defer attached texture release to its GL owner, and join the callback
-  thread without holding its monitor.
+#### Pause
 
-Some Android MediaCodec decoders report macroblock-aligned buffer dimensions without crop fields,
-while their SurfaceTexture still applies the correct crop. Using those padded dimensions to fit the
-picture creates extra black bars:
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0005`](third-party/libvlc/patches/vlc/0005-es_out-start-a-decoder-made-while-the-input-is-pause.patch) | A decoder made after its input paused started unpaused. Ogg finds its streams in its first data pages, so an Ogg track opened paused (`start-paused`) played the start it had buffered. | A decoder made while its input is paused starts paused, as `input_DecoderChangePause`'s FIXME describes for a track added while paused. |
+| [`vlc/0017`](third-party/libvlc/patches/vlc/0017-decoder-restore-paused-pictures-after-replacing-the-video-output.patch) | A video track reselected while paused could handle its pause before its video output existed. The output then started unpaused and could discard the first picture. | The current pause is applied when the video output is acquired or reinitialized, serialized with pause changes. The pictures a paused seek or frame step asks for are shown even after buffering ends. |
 
-- `patches/vlc/0007-mediacodec-retain-visible-dimensions-without-crop.patch`: keep input/SPS visible
-  dimensions separately from coded dimensions, use them for initial opaque output and for missing or
-  invalid crop fields when they fit the output buffer, and update them when the SPS changes. Valid
-  decoder crop rectangles remain authoritative.
+#### Seeking, times and lengths
 
-Program and transport streams can identify video tracks before the decoder learns their dimensions
-and pixel aspect. Reading parsed-media metadata early would then cache zero dimensions:
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0013`](third-party/libvlc/patches/vlc/0013-ps-seek-to-a-time-by-the-timestamps-and-show-from-it-when-precise.patch) | MPEG-PS: a seek moved to a share of the bytes, landing off by the stream's start offset and its uneven bitrate. With pack headers seconds apart, as FFmpeg writes them above about 0.8 Mb/s, there was no length, the clock stood still between them and repeated after a seek. | Seeks search by the time track's timestamps. A precise seek or start time lands one to two seconds before the time and shows from it. The length is found on any packet. The clock advances between pack headers by the mux rate, counted in its units of 50 bytes, and is kept across PES packets. The time reported is that of the clock the pictures are shown by. |
+| [`vlc/0014`](third-party/libvlc/patches/vlc/0014-ts-take-times-from-the-first-picture-and-decode-a-precise-seek-from-its-key-picture.patch) | MPEG-TS: times were taken from the first PCR, ahead of the first picture by the muxer's lead, and a seek landed past the key picture the time is decoded from. | Times start at the first picture or sound due. A precise seek lands two seconds early by the clock, decodes from there and shows from the time. The length is taken between presentation timestamps, so a short stream cannot have a negative length. |
+| [`vlc/0015`](third-party/libvlc/patches/vlc/0015-avformat-include-AMR-storage-framing-in-the-duration-estimate.patch) | Raw AMR stores one byte of framing per channel every 20 ms, which the bitrate estimate left out, overestimating the length. | The estimate includes the 400 bits/s per channel of framing. Timestamp and container lengths still win. |
+| [`vlc/0016`](third-party/libvlc/patches/vlc/0016-input-process-the-start-time-seek-before-demuxing-pictures.patch) | A start-time seek was queued but processed after the first demux, so a software decoder could show the beginning first. | Queued controls are processed before the first demux when the length is known and an audio or video stream is selected. Inputs that find their timeline or streams on the first demux (MPEG-PS, Ogg) keep that probe. |
+| [`vlc/0027`](third-party/libvlc/patches/vlc/0027-decoder-drop-pictures-of-a-timeline-a-pending-flush-discards.patch) | A seek only marks a decoder flushing. Until its thread flushes the module, MediaCodec's output thread could queue a picture from before the seek, which was taken as the first one after it. | Pictures are discarded while the decoder is flushing, checked under the owner lock. |
+| [`vlc/0028`](third-party/libvlc/patches/vlc/0028-decoder-cancel-a-pending-drain-when-flushing.patch) | A drain asked for at the end of the input survived a seek's flush, and the decoder drained in the middle of the new timeline. MediaCodec then output nothing. | A flush cancels the pending drain. |
+| [`vlc/0029`](third-party/libvlc/patches/vlc/0029-input-demux-on-demand-while-a-paused-picture-s-decoder-starves.patch) | Paused, the input stops demuxing once buffered, but FFmpeg's frame threads, reordering or MediaCodec's latency can need more input before the picture a paused seek asks for. | While a decoder still owes that picture and has consumed its input (`ES_OUT_GET_AWAITED_PICTURE`), the paused input demuxes one block every 5 ms. |
+| [`vlc/0031`](third-party/libvlc/patches/vlc/0031-decoder-owe-a-seek-s-picture-to-a-decoder-paused-before-it-showed.patch) | A pause right after a seek reset the picture the seek was owed, and the old position stayed on screen. | A video decoder flushed by a seek is owed a picture until it shows one, also when it is paused first. |
 
-- `patches/libvlcjni/0004-expose-current-input-track-formats.patch`: expose
-  `IMedia.getTracksSnapshot()` to read current native input formats, including visible dimensions,
-  pixel aspect and orientation discovered during decoding. Parsed-media metadata keeps its cache.
+#### Video size and pixel aspect
 
-Matroska's display aspect ratio uses the same width-to-height direction as pixel display units:
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0007`](third-party/libvlc/patches/vlc/0007-mediacodec-retain-visible-dimensions-without-crop.patch) | Some MediaCodec decoders report macroblock-aligned dimensions without crop fields; fitting the padded size added black bars. | Visible dimensions from the input or SPS are kept apart from the coded ones and used when crop fields are missing or invalid. Valid crop fields still win. |
+| [`libvlcjni/0004`](third-party/libvlc/patches/libvlcjni/0004-expose-current-input-track-formats.patch) | MPEG-PS and MPEG-TS tracks are identified before the decoder learns their size and pixel aspect, and parsed metadata cached zero dimensions. | `IMedia.getTracksSnapshot()` reads the input's current formats, with the size, pixel aspect and orientation found while decoding. |
+| [`vlc/0008`](third-party/libvlc/patches/vlc/0008-mkv-preserve-display-aspect-ratio.patch) | Matroska's display aspect (`DisplayUnit=3`) was applied inverted: a 384x288 picture shown as 16:9 got 3:4 pixels. | The display aspect is divided by the picture's aspect, giving 4:3. |
+| [`vlc/0009`](third-party/libvlc/patches/vlc/0009-mediacodec-read-undeclared-pixel-aspect.patch) | MediaCodec's output format has no pixel aspect, so H.264 or HEVC without a container aspect kept square pixels. | The pixel aspect is read from the current SPS. A container's aspect still wins. |
+| [`vlc/0011`](third-party/libvlc/patches/vlc/0011-mediacodec-request-the-opaque-output-after-parsing-the-codec-configuration.patch) | A window learns the aspect an output opens with before the first picture, and MediaCodec opened its opaque output at 1:1 before reading the SPS. | The codec configuration is parsed before the opaque output is requested. |
+| [`vlc/0012`](third-party/libvlc/patches/vlc/0012-mediacodec-open-the-mpeg-2-opaque-output-with-the-aspect-of-its-first-sequence-header.patch) | The same for MPEG-1/2, whose aspect is only known from the first sequence header. | The opaque output is requested, and MediaCodec started, once the first block's sequence header is parsed. |
 
-- `patches/vlc/0008-mkv-preserve-display-aspect-ratio.patch`: divide the declared display aspect by
-  the visible picture aspect for `DisplayUnit=3`, instead of inverting the pixel aspect. A 384x288
-  picture displayed as 16:9 has SAR 4:3, not 3:4.
+#### Video output
 
-MediaCodec's output format omits pixel aspect. An H.26x input whose container does not declare it
-can therefore retain the opaque output's initial square pixels:
+| Patch | Problem | Change |
+|---|---|---|
+| [`libvlcjni/0003`](third-party/libvlc/patches/libvlcjni/0003-cancel-surface-initialization-on-view-release.patch) | Detaching views could race the bindings' texture initialization and use a Surface not yet made; unattached callback loopers stayed alive. | The texture and its Surface are published together, detaching cancels pending initialization, and the callback thread is joined without holding its monitor. |
+| [`vlc/0019`](third-party/libvlc/patches/vlc/0019-android-display-crop-public-software-output-to-visible-pixels.patch) | Android's public software windows have no crop API, so coded padding, such as dav1d's aligned AV1 buffers, showed as black margins in stills. | The visible rectangle is negotiated as the window's format and the converter applies the crop, keeping decoder storage, alignment and pool ownership. |
+| [`vlc/0025`](third-party/libvlc/patches/vlc/0025-opengl-convert-full-range-yuv-without-expanding-its-range-again.patch) | The OpenGL output's YUV to RGB matrices expand a limited range. A full-range source, such as MJPEG, was expanded twice, clipping its blacks and whites. | The full-range matrices are chosen when the source is full range. |
 
-- `patches/vlc/0009-mediacodec-read-undeclared-pixel-aspect.patch`: read the current H.264/HEVC SPS
-  when updating an output whose input did not specify pixel aspect. A container's declared ratio
-  remains authoritative.
+#### Hardware decoders
 
-A video output learns a changed pixel aspect from the pictures it displays, and applies it to the
-window only after displaying them: the aspect it is opened with is the only one the window knows before
-the first picture. MediaCodec opened its opaque output at a provisional 1:1 before it knew the aspect of
-an H.264/HEVC input whose container declares none, or of an MPEG-2 sequence, whose packetizer states
-none:
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0026`](third-party/libvlc/patches/vlc/0026-mediacodec-hand-a-vp9-profile-the-codec-does-not-state-to-the-next-decoder.patch) | MediaCodec picks a VP9 decoder by MIME type. One without 10/12-bit support failed on Profile 2 after consuming input, and the next decoder started at a later key frame. | The first frame's profile is read; when the codec does not state it, the stream goes to the next decoder (FFmpeg) before any input is queued. |
+| [`vlc/0030`](third-party/libvlc/patches/vlc/0030-mediacodec-hand-mpeg-4-part-2-with-b-vops-to-the-next-decoder.patch) | A hardware MPEG-4 Part 2 decoder can output the previous reference picture in place of each B-VOP while stating the Advanced Simple profile, and nothing reports it. | A stream whose video object layer allows B-VOPs (`low_delay` unset) goes to FFmpeg before any input is queued. |
 
-- `patches/vlc/0011-mediacodec-request-the-opaque-output-after-parsing-the-codec-configuration.patch`:
-  parse the codec configuration before requesting the opaque output, so an output whose SPS is in the
-  extra data opens with that aspect.
-- `patches/vlc/0012-mediacodec-open-the-mpeg-2-opaque-output-with-the-aspect-of-its-first-sequence-header.patch`:
-  for an MPEG-1/2 input that declares no aspect, request the opaque output and start MediaCodec once
-  the first block, which carries the sequence header, is parsed, so the output opens with the aspect it
-  states.
+#### Ogg, with libVLC's own demuxer
 
-The MPEG-PS demuxer took the stream's first timestamp off a time it sought to again, and moved to that
-share of the bytes, so a seek landed early by the stream's start offset and further off by how unevenly the
-bytes spread over the time. Where pack headers are seconds apart, as FFmpeg writes them above about
-0.8 Mb/s, it found no length, held the clock still between them, and after a seek repeated the clock from
-before it. The MPEG-TS demuxer took times from the first PCR, ahead of the first picture by as much as the
-muxer wrote ahead, and a seek landed past the key picture the picture at the time is decoded from:
-
-- `patches/vlc/0013-ps-seek-to-a-time-by-the-timestamps-and-show-from-it-when-precise.patch`: search
-  for a time by the timestamps of the time track; a precise seek, a start time included, lands one to two
-  seconds before it and shows from it; find the length on any packet; advance the clock between pack
-  headers by the bytes at the mux rate, counted in its units of 50 bytes, and take it from a timestamp
-  after a seek; retain the pack clock between PES packets so reordered B-picture timestamps do not
-  reset it; report the time of the clock the pictures are shown by.
-- `patches/vlc/0014-ts-take-times-from-the-first-picture-and-decode-a-precise-seek-from-its-key-picture.patch`:
-  take times from the first picture or sound due; a precise seek lands two seconds earlier by the clock,
-  decodes from there and shows from the time; record the last presentation timestamp separately
-  from the last PCR/DTS and compute length between presentation endpoints, so short streams
-  cannot have a negative length from mixed clock origins.
-
-Raw AMR stores one byte of framing per channel every 20 ms. Its estimated bitrate counts only the
-codec payload, which overestimates duration when applied to the whole stored file:
-
-- `patches/vlc/0015-avformat-include-AMR-storage-framing-in-the-duration-estimate.patch`: include
-  the 400 bits/s per channel of storage framing in the bitrate-derived duration. Timestamp and
-  container durations remain authoritative, without an extra scan of the whole input.
-
-An input queues its requested start-time seek before playback. A software decoder could display a
-picture from the beginning during the first demux, before that seek was processed:
-
-- `patches/vlc/0016-input-process-the-start-time-seek-before-demuxing-pictures.patch`: drain the
-  initial queued controls before the first demux when opening has already found the timeline's length
-  and selected an audio or video stream. Inputs that discover their timeline (MPEG-PS) or create their
-  streams (Ogg) during the first demux retain that initial probe, so an unready seek is not lost.
-  A zero control deadline prevents waiting for a clock before demuxing starts.
-
-A video track reselected while paused can handle its pause before a video output exists. The
-later output starts unpaused and may discard the late first picture while the decoder remains paused:
-
-- `patches/vlc/0017-decoder-restore-paused-pictures-after-replacing-the-video-output.patch`:
-  synchronize the current pause when acquiring or reinitializing the video output, serialized with
-  control changes. Track the last handled video pause and wake the decoder for a newer request,
-  avoiding duplicate pause commands and lost changes during asynchronous format updates.
-  Release the FIFO lock before waiting for the video output. Force pictures requested by the existing
-  paused seek/step budget even after buffering ends; preserve preroll, timestamp checks and pause.
-
-Features the app does not use are also left out: stream output (transcoding, recording, casting), network
-access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
-the modules listed in `module_blacklist`.
-
-Public Android software windows have no crop API. Coded storage padding, including dav1d's aligned
-AV1 buffers, therefore appeared as black margins in captured stills:
-
-- `patches/vlc/0019-android-display-crop-public-software-output-to-visible-pixels.patch`:
-  negotiate the rotated visible rectangle with zero offsets and let the existing display converter
-  consume the source crop. Preserve decoder storage, alignment, pool ownership and backpressure.
-  Reset the display pool and converter together when the source crop changes, and propagate rotated
-  pixel aspect without resizing storage. Opaque MediaCodec, private ANW and live GL paths are preserved.
-
-The OpenGL output's YUV to RGB matrices expand a limited-range source to full range. A full-range source,
-as MJPEG's pictures are, was expanded a second time, clipping its blacks and whites:
-
-- `patches/vlc/0025-opengl-convert-full-range-yuv-without-expanding-its-range-again.patch`: select the
-  full-range matrices of each colour space when the format states a full-range source.
-
-MediaCodec decoders are chosen by MIME type, and some hardware decoders accept input they cannot decode
-rightly. Each case is handed to the next decoder (FFmpeg) before any input is queued:
-
-- `patches/vlc/0026-mediacodec-hand-a-vp9-profile-the-codec-does-not-state-to-the-next-decoder.patch`:
-  read the first frame's VP9 profile and reload when the opened codec does not state it, as a codec
-  without 10/12-bit support does for Profile 2.
-- `patches/vlc/0030-mediacodec-hand-mpeg-4-part-2-with-b-vops-to-the-next-decoder.patch`: read the
-  video object layer's `low_delay` flag; a stream that allows B-VOPs is decoded by FFmpeg, since a
-  hardware decoder can output the previous reference picture in place of each B-VOP while stating the
-  Advanced Simple profile.
-
-A seek flushes the decoders, but a decoder thread flushes its module later, and a pending drain or a
-pause could leave a seek with no picture or no sound:
-
-- `patches/vlc/0027-decoder-drop-pictures-of-a-timeline-a-pending-flush-discards.patch`: discard the
-  pictures a module outputs from its own thread (MediaCodec) while the decoder is flushing, under the
-  owner lock, so a picture from before the seek is not taken as the first one after it.
-- `patches/vlc/0028-decoder-cancel-a-pending-drain-when-flushing.patch`: a flush cancels the drain the
-  end of the input asked for, so a seek back from near the end does not drain mid-timeline.
-- `patches/vlc/0029-input-demux-on-demand-while-a-paused-picture-s-decoder-starves.patch`: while paused,
-  demux one block at a time, every 5 ms, as long as a decoder that still owes a paused seek's picture
-  has consumed its input (`ES_OUT_GET_AWAITED_PICTURE`), as FFmpeg's frame threads and MediaCodec's
-  latency need.
-- `patches/vlc/0031-decoder-owe-a-seek-s-picture-to-a-decoder-paused-before-it-showed.patch`: a video
-  decoder flushed by a seek while playing, and paused before it showed a picture, shows the picture a
-  paused seek gets.
-- `patches/vlc/0034-audiotrack-keep-a-paused-output-paused-through-a-flush.patch`: Android's AudioTrack
-  output stays paused through a flush, so a paused seek does not sound what the device still held.
-
-Ogg is opened by libVLC's own demuxer, built with libvorbis to time Vorbis pages by. Several of its paths
-lost seeks or times:
-
-- `patches/vlc/0032-speex-flush-only-bits-that-were-initialized.patch`: the Speex decoder resets its bits
-  on a flush only once the headers initialized them; a seek before the first packet crashed.
-- `patches/vlc/0033-ogg-keep-the-logical-streams-at-the-physical-end-so-that-a-seek-back-finds-them.patch`:
-  at the end of a file the logical streams are kept, and their end state is reset on a seek, so seeks
-  after the end are not refused.
-- `patches/vlc/0035-oggseek-search-pages-for-a-time-before-estimating-from-the-bitrate.patch`: a single
-  audio stream is sought by searching its pages by granule; the estimate from the nominal bitrate of
-  Vorbis, Speex and FLAC is used only where searching cannot be done.
-- `patches/vlc/0036-ogg-time-flac-packets-by-their-frame-headers.patch`: FLAC packets, which Ogg times
-  only at the end of a page of up to a second, are timed by the samples their frame headers state, as
-  Vorbis, Opus and Speex packets are, including the first page after a seek.
-- `patches/vlc/0037-oggseek-read-to-the-end-when-probing-the-length.patch`: the length probe reads to
-  the end each time and takes the greatest granule, so a last page that starts before the bytes read is
-  found.
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0032`](third-party/libvlc/patches/vlc/0032-speex-flush-only-bits-that-were-initialized.patch) | A seek before the first Speex packet reset bits that were not initialized, and crashed. | Bits are reset on a flush only once the headers initialized them. |
+| [`vlc/0033`](third-party/libvlc/patches/vlc/0033-ogg-keep-the-logical-streams-at-the-physical-end-so-that-a-seek-back-finds-them.patch) | At the end of a file the demuxer deleted its logical streams to look for a chained group, and every later seek failed. | At the physical end the streams are kept, and a seek resets their end state. |
+| [`vlc/0035`](third-party/libvlc/patches/vlc/0035-oggseek-search-pages-for-a-time-before-estimating-from-the-bitrate.patch) | A single audio stream was sought by an estimate from its nominal bitrate: far off for variable-bitrate Vorbis, Speex and FLAC, and past the end of a small file. | Pages are searched by granule first; the estimate is used only where searching cannot be done. |
+| [`vlc/0036`](third-party/libvlc/patches/vlc/0036-ogg-time-flac-packets-by-their-frame-headers.patch) | Ogg times only a page's last packet, and a FLAC page can hold a second. FLAC packets were not interpolated, so after a seek the audio came a second behind its clock and was dropped. | Each FLAC packet is timed by the samples its frame header states, as Vorbis, Opus and Speex packets are. |
+| [`vlc/0037`](third-party/libvlc/patches/vlc/0037-oggseek-read-to-the-end-when-probing-the-length.patch) | The length probe stopped short of a last page that starts before the bytes it read, and took an earlier page's time. | It reads to the end each time and takes the greatest granule. |
 
 ## Build
 
