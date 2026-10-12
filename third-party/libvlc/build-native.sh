@@ -35,8 +35,9 @@
 #    undeclared H.26x pixel aspect read from the current SPS by MediaCodec), and seek needs
 #    (MPEG-PS and MPEG-TS sought to the picture at the time, the start-time seek made before
 #    pictures are demuxed, no picture of a timeline a flush discards, no drain left pending
-#    across a flush, demuxing on demand while a paused picture's decoder starves, and the
-#    picture a seek owes a decoder paused before showing it), and pause needs (pictures restored
+#    across a flush, demuxing on demand while a paused picture's decoder starves, no clock
+#    reference taken as late while paused, and the picture a seek owes a decoder paused before
+#    showing it), and pause needs (pictures restored
 #    after the video output is replaced, and an AudioTrack kept paused through a flush), and Ogg
 #    needs (logical streams kept at the physical end, pages searched before a bitrate estimate,
 #    FLAC packets timed by their frame headers, the length read from the last page however long,
@@ -185,7 +186,7 @@ die() {
 }
 
 # The build variant, from the environment: ./local_build.sh sets it for a version named after it
-# (3.7.6-27-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-27). A variant changes
+# (3.7.6-28-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-28). A variant changes
 # only which demuxer opens Ogg inputs, and with it how Vorbis is decoded:
 #   (none)        libVLC's own Ogg demuxer, which plays every link of a chained stream. It times
 #                 Vorbis pages through libvorbis, to seek by, so libvorbis and VLC's Vorbis
@@ -527,7 +528,7 @@ write_build_info() {
         echo "NDK: r$NDK_RELEASE ($ANDROID_NDK)"
         echo "ABI: $ANDROID_ABI, API $ANDROID_API"
         echo "Variant: ${LIBVLC_VARIANT:-none} (Ogg demuxer: $OGG_DEMUXER)"
-        # Match fetch_sources: retained diagnostic patches do not describe the compiled code.
+        # The directories fetch_sources applies.
         echo "Patches: $(cd "$RECIPE_DIR/patches" && find ./libvlcjni ./vlc -maxdepth 1 -type f -name '*.patch' | sort | tr '\n' ' ')"
         echo "Contribs:"
         local package

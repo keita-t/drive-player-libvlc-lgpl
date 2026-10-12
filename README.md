@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-28 | `libvlc-lgpl-3.7.6-28` |
 | 3.7.6-27 | `libvlc-lgpl-3.7.6-27` |
 | 3.7.6-19 | `libvlc-lgpl-3.7.6-19` |
 | 3.7.6-17 | `libvlc-lgpl-3.7.6-17` |
@@ -108,6 +109,7 @@ repository's history.
 | [`vlc/0027`](third-party/libvlc/patches/vlc/0027-decoder-drop-pictures-of-a-timeline-a-pending-flush-discards.patch) | A seek only marks a decoder flushing. Until its thread flushes the module, MediaCodec's output thread could queue a picture from before the seek, which was taken as the first one after it. | Pictures are discarded while the decoder is flushing, checked under the owner lock. |
 | [`vlc/0028`](third-party/libvlc/patches/vlc/0028-decoder-cancel-a-pending-drain-when-flushing.patch) | A drain asked for at the end of the input survived a seek's flush, and the decoder drained in the middle of the new timeline. MediaCodec then output nothing. | A flush cancels the pending drain. |
 | [`vlc/0029`](third-party/libvlc/patches/vlc/0029-input-demux-on-demand-while-a-paused-picture-s-decoder-starves.patch) | Paused, the input stops demuxing once buffered, but FFmpeg's frame threads, reordering or MediaCodec's latency can need more input before the picture a paused seek asks for. | While a decoder still owes that picture and has consumed its input (`ES_OUT_GET_AWAITED_PICTURE`), the paused input demuxes one block every 5 ms. |
+| [`vlc/0038`](third-party/libvlc/patches/vlc/0038-es_out-take-no-clock-reference-as-late-while-the-input-is-paused.patch) | The paused input's on-demand demuxing (0029) reached clock references that were compared with the wall clock while the clock stood still. Once a decoder took long enough, as MediaCodec's MPEG-4 Part 2 decoder does after a video track is selected again, one was taken as late: the clock was reset, the decoders flushed, and the paused picture lost with the key picture it was decoded from. | No clock reference is taken as late while the input is paused, as while stepping frames. |
 | [`vlc/0031`](third-party/libvlc/patches/vlc/0031-decoder-owe-a-seek-s-picture-to-a-decoder-paused-before-it-showed.patch) | A pause right after a seek reset the picture the seek was owed, and the old position stayed on screen. | A video decoder flushed by a seek is owed a picture until it shows one, also when it is paused first. |
 
 #### Video size and pixel aspect
