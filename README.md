@@ -30,6 +30,13 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 | 3.7.6-2 | `libvlc-lgpl-3.7.6-2` |
 | 3.7.6-1 | `libvlc-lgpl-3.7.6-1` |
 
+Builds made for comparison, which the app does not ship, have their corresponding source on the `variants` branch
+and their tags there; the built library is attached to the GitHub release of each tag.
+
+| Library version | Tag | What it is |
+|---|---|---|
+| 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without |
+
 ## Contents
 
 | Path | What it is |
