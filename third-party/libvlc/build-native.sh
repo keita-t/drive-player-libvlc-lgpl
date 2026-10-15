@@ -46,7 +46,7 @@
 #    and pictures need (full-range YUV converted once, and public Android software output
 #    converted into the visible rectangle, retaining decoder storage alignment and pool
 #    ownership).
-#  - the variant (LIBVLC_VARIANT, below): which demuxer opens Ogg.
+#  - the variant (LIBVLC_VARIANT, below): which demuxer opens Ogg, or which of the VLC patches apply.
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 
@@ -186,8 +186,8 @@ die() {
 }
 
 # The build variant, from the environment: ./local_build.sh sets it for a version named after it
-# (3.7.6-28-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-28). A variant changes
-# only which demuxer opens Ogg inputs, and with it how Vorbis is decoded:
+# (3.7.6-29-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-29). A variant changes
+# only which demuxer opens Ogg inputs, and with it how Vorbis is decoded, or which VLC patches apply:
 #   (none)        libVLC's own Ogg demuxer, which plays every link of a chained stream. It times
 #                 Vorbis pages through libvorbis, to seek by, so libvorbis and VLC's Vorbis
 #                 decoder are built.
@@ -196,7 +196,31 @@ die() {
 #                 A chained stream plays only its first link: FFmpeg's demuxer times each link
 #                 from zero and does not hand over a link whose settings change. Kept for the
 #                 comparison with libVLC's demuxer.
+#   naked         the default build with only the VLC patches the app cannot run without
+#                 (NAKED_VLC_PATCHES): libVLC as upstream makes it, in the components and
+#                 configuration above, behind the app's callback input. libvlcjni's patches all
+#                 apply: the app calls the API they add. A build to compare a patch's effect, or the
+#                 engine's behaviour, against upstream's; never one the app ships.
 readonly LIBVLC_VARIANT="${LIBVLC_VARIANT:-}"
+
+# The mode, from the environment, as ./local_build.sh sets it:
+#   full         (the default) everything, into a fresh work tree, as described above;
+#   incremental  the recipe's patches applied again to the work tree a full build left, and only what
+#                they change built again: VLC's changed objects, its install, the module table and
+#                the link. For trying patches: ./local_build.sh publishes the result under a -dev
+#                version, never as a recipe's version, whose builds start from a fresh work tree;
+#   check        the recipe's patches applied in scratch worktrees of that work tree, and the C and
+#                C++ files they change since its last build compiled for their syntax, with the
+#                warnings each gains over its built version. Nothing is built, and out/ is untouched.
+# Both need the work tree of a full build of the same libvlcjni pin and variant; a patch that
+# changes VLC's build system (configure.ac, a Makefile.am) needs a full build.
+readonly LIBVLC_MODE="${LIBVLC_MODE:-full}"
+
+# What the work tree was built from, written by a full build and checked by the other modes.
+readonly BUILT_STAMP="$WORK_DIR/full-build.env"
+# The author this recipe's patches carry: a work-tree repository's own patch commits are its
+# newest ones by this author, applied on the newest commit by another.
+readonly RECIPE_PATCH_AUTHOR="drive-player@localhost"
 
 select_variant() {
     case "$LIBVLC_VARIANT" in
@@ -210,7 +234,12 @@ select_variant() {
             vlc_configure_args+=(--disable-vorbis)
             module_blacklist+=(ogg)
             ;;
-        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none or ogg-avformat." ;;
+        naked)
+            OGG_DEMUXER="libVLC's ogg"
+            contrib_packages+=(vorbis)
+            vlc_configure_args+=(--enable-vorbis)
+            ;;
+        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none, ogg-avformat or naked." ;;
     esac
 }
 
@@ -220,6 +249,25 @@ fetch_commit() {
     git init -q "$dir"
     git -C "$dir" fetch -q --depth 1 "$repository" "$commit"
     git -C "$dir" checkout -q --detach FETCH_HEAD
+}
+
+# The VLC patches the naked variant applies, by number: 0001 builds the deinterlace module without
+# the GPL's yadif, which the LGPL-only build needs, and 0002 has the app's callback input reported
+# fast-seekable, without which libVLC reads the app's input as a slow stream.
+readonly NAKED_VLC_PATCHES=(0001 0002)
+
+# The recipe's VLC patches the variant applies, one path a line: every one, or the naked variant's.
+recipe_vlc_patches() {
+    local patch
+    for patch in "$RECIPE_DIR"/patches/vlc/*.patch; do
+        if [ "$LIBVLC_VARIANT" = naked ]; then
+            case " ${NAKED_VLC_PATCHES[*]} " in
+                *" $(basename "$patch" | cut -c1-4) "*) ;;
+                *) continue ;;
+            esac
+        fi
+        printf '%s\n' "$patch"
+    done
 }
 
 apply_patches() {
@@ -241,7 +289,9 @@ fetch_sources() {
     fetch_commit "$VLC_DIR" "$VLC_REPOSITORY" "$VLC_COMMIT"
     # libvlcjni's patches first, as its get-vlc.sh applies them, then this build's own.
     apply_patches "$VLC_DIR" "$LIBVLCJNI_DIR"/libvlc/patches/*.patch
-    apply_patches "$VLC_DIR" "$RECIPE_DIR"/patches/vlc/*.patch
+    local -a vlc_patches
+    mapfile -t vlc_patches < <(recipe_vlc_patches)
+    apply_patches "$VLC_DIR" "${vlc_patches[@]}"
 }
 
 setup_toolchain() {
@@ -528,8 +578,9 @@ write_build_info() {
         echo "NDK: r$NDK_RELEASE ($ANDROID_NDK)"
         echo "ABI: $ANDROID_ABI, API $ANDROID_API"
         echo "Variant: ${LIBVLC_VARIANT:-none} (Ogg demuxer: $OGG_DEMUXER)"
-        # The directories fetch_sources applies.
-        echo "Patches: $(cd "$RECIPE_DIR/patches" && find ./libvlcjni ./vlc -maxdepth 1 -type f -name '*.patch' | sort | tr '\n' ' ')"
+        # The patches fetch_sources applies.
+        echo "Patches: $({ printf '%s\n' "$RECIPE_DIR"/patches/libvlcjni/*.patch; recipe_vlc_patches; } |
+            sed "s|^$RECIPE_DIR/patches/|./|" | sort | tr '\n' ' ')"
         echo "Contribs:"
         local package
         for package in "${contrib_packages[@]}"; do
@@ -542,12 +593,193 @@ write_build_info() {
     } > "$OUT_DIR/build-info.txt"
 }
 
-main() {
-    rm -rf "$SRC_DIR" "$OUT_DIR" "$WORK_DIR/home"
-    mkdir -p "$SRC_DIR" "$OUT_DIR" "$TARBALLS_DIR" "$WORK_DIR/home"
-    export HOME="$WORK_DIR/home"
+write_built_stamp() {
+    printf 'LIBVLCJNI_COMMIT=%s\nVLC_COMMIT=%s\nLIBVLC_VARIANT=%s\n' \
+        "$LIBVLCJNI_COMMIT" "$VLC_COMMIT" "$LIBVLC_VARIANT" > "$BUILT_STAMP"
+}
 
-    select_variant
+# The work tree of a full build, as the incremental and check modes need it: built to its end
+# from the recipe's libvlcjni pin, as the variant asked for now.
+require_built_tree() {
+    [ -f "$BUILT_STAMP" ] && [ -f "$VLC_BUILD_DIR/config.h" ] ||
+        die "No work tree of a full build in $WORK_DIR: run ./local_build.sh --build-libvlc first."
+    local key value
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LIBVLCJNI_COMMIT) [ "$value" = "$LIBVLCJNI_COMMIT" ] ||
+                die "The work tree was built from libvlcjni $value, not the recipe's $LIBVLCJNI_COMMIT: a full build is needed." ;;
+            LIBVLC_VARIANT) [ "$value" = "$LIBVLC_VARIANT" ] ||
+                die "The work tree was built as variant '${value:-none}', not '${LIBVLC_VARIANT:-none}': a full build is needed." ;;
+            VLC_COMMIT) VLC_COMMIT="$value" ;;
+        esac
+    done < "$BUILT_STAMP"
+}
+
+# The commit [1]'s recipe patches were applied on: its newest commit by another author.
+patch_base() {
+    git -C "$1" log --format='%H %ae' | awk -v author="$RECIPE_PATCH_AUTHOR" '$2 != author { print $1; exit }'
+}
+
+# The scratch worktree of repository [1].
+scratch_of() {
+    printf '%s/patch-check/%s\n' "$WORK_DIR" "$(basename "$1")"
+}
+
+# The recipe's patches [2...] applied on [1]'s patch base in its scratch worktree, kept for the
+# caller to read; prints the commit they make. A patch that does not apply stops the run, named by
+# git am.
+patched_worktree() {
+    local dir="$1"
+    shift
+    remove_worktree "$dir"
+    git -C "$dir" worktree add -q --detach "$(scratch_of "$dir")" "$(patch_base "$dir")"
+    apply_patches "$(scratch_of "$dir")" "$@" >&2 ||
+        die "The recipe's patches do not apply to $(basename "$dir"): see the patch git am names above."
+    git -C "$(scratch_of "$dir")" rev-parse HEAD
+}
+
+# [1]'s scratch worktree removed, if any; the commits made in it stay in the repository.
+remove_worktree() {
+    git -C "$1" worktree remove --force "$(scratch_of "$1")" 2>/dev/null || true
+    git -C "$1" worktree prune
+}
+
+# The files that differ between [1]'s checkout and commit [2], as paths in the repository.
+changed_files() {
+    git -C "$1" diff --name-only HEAD "$2"
+}
+
+# Stops when [1...] holds a file of VLC's build system, or the VLC patches libvlcjni carries,
+# which only a full build applies.
+refuse_build_system_changes() {
+    local file
+    for file in "$@"; do
+        case "$file" in
+            configure.ac|bootstrap|*.am|m4/*|libvlc/patches/*)
+                die "$file changes what a full build sets up: a full build is needed (./local_build.sh --build-libvlc)." ;;
+        esac
+    done
+}
+
+# Compile [2] in tree [1] (VLC's, or libvlcjni's) for its syntax with the built configuration's
+# flags, printing the compiler's messages.
+compile_syntax() {
+    local tree="$1" file="$2" compiler flags name
+    local -a defines=(-DHAVE_CONFIG_H) includes=()
+    case "$file" in
+        *.c) compiler="$CROSS_CLANG"; flags="$(sed -n 's/^CFLAGS = //p' "$VLC_BUILD_DIR/modules/Makefile")" ;;
+        *) compiler="${CROSS_CLANG}++"; flags="$(sed -n 's/^CXXFLAGS = //p' "$VLC_BUILD_DIR/modules/Makefile")" ;;
+    esac
+    if [ -f "$tree/include/vlc_common.h" ]; then
+        name="$(basename "$file")"
+        name="${name%.*}"
+        name="${name//-/_}"
+        defines+=(-DMODULE_STRING="\"$name\"" -DMODULE_NAME="$name")
+        includes=(-I"$VLC_BUILD_DIR" -I"$VLC_BUILD_DIR/include" -I"$tree/include" -I"$VLC_BUILD_DIR/src" -I"$tree/src"
+            -I"$VLC_BUILD_DIR/modules" -I"$tree/modules" -I"$tree/modules/access" -I"$tree/modules/codec")
+    else
+        includes=(-I"$tree/libvlc/jni" -I"$VLC_DIR/include" -I"$VLC_BUILD_DIR/include" -I"$VLC_BUILD_DIR")
+    fi
+    # shellcheck disable=SC2086 # the built flags are words of their own
+    "$compiler" -fsyntax-only "${defines[@]}" "${includes[@]}" -I"$(dirname "$tree/$file")" \
+        -I"$CONTRIB_PREFIX/include" $flags "$tree/$file" 2>&1
+}
+
+# The warnings in compiler messages [1], without where they are, one a line and sorted: a file's
+# own warnings move with its lines, so they are compared by what they say.
+warnings_of() {
+    grep -o 'warning: .*' <<< "$1" | sort || true
+}
+
+# Each C and C++ file of repository [1] that differs from commit [2], compiled for its syntax in
+# [1]'s scratch worktree: its errors are counted in ERRORS, and its warnings over its built version
+# reported. Counts the files in CHECKED.
+check_changed_sources() {
+    local dir="$1" commit="$2" scratch file built patched gained
+    scratch="$(scratch_of "$dir")"
+    while IFS= read -r file; do
+        case "$file" in *.c|*.cpp|*.cc) ;; *) continue ;; esac
+        [ -f "$scratch/$file" ] || continue
+        CHECKED=$((CHECKED + 1))
+        if ! patched="$(compile_syntax "$scratch" "$file")"; then
+            ERRORS=$((ERRORS + 1))
+            printf '\n%s: errors\n%s\n' "$file" "$patched"
+            continue
+        fi
+        built=""
+        if [ -f "$dir/$file" ]; then built="$(compile_syntax "$dir" "$file" || true)"; fi
+        gained="$(comm -13 <(warnings_of "$built") <(warnings_of "$patched"))"
+        if [ -n "$gained" ]; then
+            printf '\n%s: warnings the patches add\n%s\n' "$file" "$gained"
+        else
+            printf '%s: no errors, no new warnings\n' "$file"
+        fi
+    done < <(changed_files "$dir" "$commit")
+}
+
+check_patches() {
+    require_built_tree
+    setup_toolchain
+    log "Applying the recipe's patches in scratch worktrees"
+    local jni vlc
+    local -a vlc_patches
+    mapfile -t vlc_patches < <(recipe_vlc_patches)
+    jni="$(patched_worktree "$LIBVLCJNI_DIR" "$RECIPE_DIR"/patches/libvlcjni/*.patch)"
+    vlc="$(patched_worktree "$VLC_DIR" "${vlc_patches[@]}")"
+    log "Checking the C and C++ files the patches change since the last build"
+    CHECKED=0
+    ERRORS=0
+    check_changed_sources "$VLC_DIR" "$vlc"
+    check_changed_sources "$LIBVLCJNI_DIR" "$jni"
+    remove_worktree "$VLC_DIR"
+    remove_worktree "$LIBVLCJNI_DIR"
+    [ "$ERRORS" -eq 0 ] || die "$ERRORS of $CHECKED changed files do not compile."
+    if [ "$CHECKED" -eq 0 ]; then
+        log "Done: the patches change no C or C++ file since the last build."
+    else
+        log "Done: the $CHECKED changed files compile."
+    fi
+}
+
+# The recipe's patches applied again to the work tree, and only what they change built again.
+build_incrementally() {
+    require_built_tree
+    rm -rf "${OUT_DIR:?}"
+    mkdir -p "$OUT_DIR"
+    setup_toolchain
+    log "Applying the recipe's patches again"
+    local jni vlc
+    local -a vlc_patches
+    mapfile -t vlc_patches < <(recipe_vlc_patches)
+    jni="$(patched_worktree "$LIBVLCJNI_DIR" "$RECIPE_DIR"/patches/libvlcjni/*.patch)"
+    vlc="$(patched_worktree "$VLC_DIR" "${vlc_patches[@]}")"
+    local -a changed=()
+    mapfile -t changed < <(changed_files "$VLC_DIR" "$vlc"; changed_files "$LIBVLCJNI_DIR" "$jni")
+    remove_worktree "$VLC_DIR"
+    remove_worktree "$LIBVLCJNI_DIR"
+    refuse_build_system_changes "${changed[@]}"
+    # Checking out the patched commits rewrites only the files that differ, so make rebuilds
+    # only what depends on them.
+    git -C "$VLC_DIR" checkout -q --detach "$vlc"
+    git -C "$LIBVLCJNI_DIR" checkout -q --detach "$jni"
+    log "Rebuilding what ${#changed[@]} changed files reach"
+    make -C "$VLC_BUILD_DIR" "$MAKEFLAGS_JOBS"
+    make -C "$VLC_BUILD_DIR" "$MAKEFLAGS_JOBS" install
+    generate_module_table
+    # ndk-build does not take a changed static library as a reason to link again.
+    rm -f "$LIBVLCJNI_DIR/libvlc/jni/obj/local/$ANDROID_ABI/libvlc.so" \
+        "$LIBVLCJNI_DIR/libvlc/jni/libs/$ANDROID_ABI/libvlc.so"
+    link_libraries
+    collect_outputs
+    write_build_info
+    printf 'Build: incremental, on the work tree of a full build of VLC %s\n' "$VLC_COMMIT" >> "$OUT_DIR/build-info.txt"
+    log "Done: $OUT_DIR"
+    cat "$OUT_DIR/build-info.txt"
+}
+
+build_fully() {
+    rm -rf "${SRC_DIR:?}" "${OUT_DIR:?}" "${WORK_DIR:?}/patch-check" "$BUILT_STAMP"
+    mkdir -p "$SRC_DIR" "$OUT_DIR" "$TARBALLS_DIR"
     fetch_sources
     setup_toolchain
     build_tools
@@ -558,8 +790,23 @@ main() {
     link_libraries
     collect_outputs
     write_build_info
+    write_built_stamp
     log "Done: $OUT_DIR"
     cat "$OUT_DIR/build-info.txt"
+}
+
+main() {
+    rm -rf "${WORK_DIR:?}/home"
+    mkdir -p "$WORK_DIR/home"
+    export HOME="$WORK_DIR/home"
+
+    select_variant
+    case "$LIBVLC_MODE" in
+        full) build_fully ;;
+        incremental) build_incrementally ;;
+        check) check_patches ;;
+        *) die "Unknown mode '$LIBVLC_MODE'; expected full, incremental or check." ;;
+    esac
 }
 
 main "$@"
