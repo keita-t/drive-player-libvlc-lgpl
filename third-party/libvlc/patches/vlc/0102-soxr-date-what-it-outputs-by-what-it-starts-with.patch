@@ -1,0 +1,93 @@
+From ba566ed7cbea5ecc626f2fbe074c5ea6dcd697f4 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 24 Oct 2026 21:16:29 +0900
+Subject: [PATCH] soxr: date what it outputs by what it starts with
+
+SoX holds part of the input it resamples to meet the need of its filter:
+some 2000 samples at the output's rate from 8 kHz, 43 ms, and 13 ms from
+44.1 kHz. What it outputs then starts with the end of the input before,
+yet each output block took the date of the input block given with it.
+The audio output, which places what it plays by that date, took the
+sound for that much early, and resampled it towards the clock, more yet
+when the variable-rate engine took over; from 8 kHz the advance it saw
+was some 110 ms against the 120 ms past which it plays silence, and now
+and then it did.
+
+Date each output block by the start of what it holds: the input's date,
+less what the resampler held before it was given the input, the last
+engine's when it is flushed into the block.
+---
+ modules/audio_filter/resampler/soxr.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/modules/audio_filter/resampler/soxr.c b/modules/audio_filter/resampler/soxr.c
+index a1b342d..86c73b3 100644
+--- a/modules/audio_filter/resampler/soxr.c
++++ b/modules/audio_filter/resampler/soxr.c
+@@ -301,6 +301,17 @@ SoXR_GetOutLen( size_t i_ilen, double f_ratio )
+     return lrint( ( i_ilen + 2 ) * f_ratio * 11. / 10. );
+ }
+ 
++/* How long what [soxr] holds of the input it was given lasts at the output's
++ * rate: the start of what it outputs next, before the input it is given then */
++static vlc_tick_t
++SoXR_HeldTime( filter_t *p_filter, soxr_t soxr )
++{
++    if( soxr == NULL || p_filter->fmt_out.audio.i_rate == 0 )
++        return 0;
++    return (vlc_tick_t)( soxr_delay( soxr ) * CLOCK_FREQ
++                         / p_filter->fmt_out.audio.i_rate );
++}
++
+ static block_t *
+ Resample( filter_t *p_filter, block_t *p_in )
+ {
+@@ -338,14 +349,21 @@ Resample( filter_t *p_filter, block_t *p_in )
+             soxr = p_sys->soxr;
+         }
+ 
++        /* What the output starts with: what the resampler held of the input
++         * before, the last one's when it is flushed into it */
++        vlc_tick_t i_held;
++
+         /* If the new soxr is different than the last one, flush it */
+         if( p_sys->last_soxr && soxr != p_sys->last_soxr && p_sys->i_last_olen )
+         {
++            i_held = SoXR_HeldTime( p_filter, p_sys->last_soxr );
+             p_flushed_out = SoXR_Resample( p_filter, p_sys->last_soxr,
+                                            NULL, p_sys->i_last_olen );
+             if( soxr )
+                 msg_Dbg( p_filter, "Using '%s' engine", soxr_engine( soxr ) );
+         }
++        else
++            i_held = SoXR_HeldTime( p_filter, soxr );
+ 
+         if( soxr )
+         {
+@@ -367,7 +385,10 @@ Resample( filter_t *p_filter, block_t *p_in )
+                 goto error;
+             p_out->i_nb_samples = i_nb_samples;
+         }
+-        p_out->i_pts = i_pts;
++        /* Dated by what it starts with, which the audio output places on the
++         * clock: dated by the input, it was taken for early by what the
++         * resampler held (43 ms from 8 kHz, 13 ms from 44.1 kHz) */
++        p_out->i_pts = i_pts - i_held;
+         return p_out;
+     }
+     else
+@@ -376,9 +397,10 @@ Resample( filter_t *p_filter, block_t *p_in )
+ 
+         const size_t i_olen = SoXR_GetOutLen( p_in->i_nb_samples,
+                                               p_sys->f_fixed_ratio );
++        const vlc_tick_t i_held = SoXR_HeldTime( p_filter, p_sys->soxr );
+         block_t *p_out = SoXR_Resample( p_filter, p_sys->soxr, p_in, i_olen );
+         if( p_out )
+-            p_out->i_pts = i_pts;
++            p_out->i_pts = i_pts - i_held;
+         return p_out;
+     }
+ error:
+-- 
+2.55.0
+

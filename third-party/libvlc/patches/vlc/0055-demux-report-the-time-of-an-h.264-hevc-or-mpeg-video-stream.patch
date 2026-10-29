@@ -1,0 +1,152 @@
+From b592860355d50aa61a9fd28543d3ef81d3048ec9 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 15 Oct 2026 03:05:09 +0900
+Subject: [PATCH] demux: report the time of an H.264, HEVC or MPEG video stream
+
+An H.264, HEVC or MPEG video stream with no container states no bitrate,
+and its demuxer, which timed its pictures at a rate from its start,
+reported no time: a player's position stayed at the start for as long
+as it played. The time of the next picture is now reported, unless a
+seek by position left the pictures with no time to begin from.
+---
+ modules/demux/mpeg/h26x.c | 27 +++++++++++++++++++++++----
+ modules/demux/mpeg/mpgv.c | 33 +++++++++++++++++++++++++++++----
+ 2 files changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/modules/demux/mpeg/h26x.c b/modules/demux/mpeg/h26x.c
+index bc423e2..44d8e08 100644
+--- a/modules/demux/mpeg/h26x.c
++++ b/modules/demux/mpeg/h26x.c
+@@ -81,6 +81,9 @@ struct demux_sys_t
+     date_t      output_dts;
+     unsigned    frame_rate_num;
+     unsigned    frame_rate_den;
++    /* Whether its pictures are timed from its start: not after a seek
++     * elsewhere, which has no time to begin from. */
++    bool        b_timed;
+ 
+     decoder_t *p_packetizer;
+ };
+@@ -331,6 +334,7 @@ static int GenericOpen( demux_t *p_demux, const char *psz_module,
+     p_demux->pf_control= Control;
+     p_demux->p_sys     = p_sys = malloc( sizeof( demux_sys_t ) );
+     p_sys->p_es        = NULL;
++    p_sys->b_timed     = true;
+     p_sys->frame_rate_num = 0;
+     p_sys->frame_rate_den = 0;
+ 
+@@ -518,7 +522,16 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
+     demux_sys_t *p_sys  = p_demux->p_sys;
+     /* FIXME calculate the bitrate */
+-    if( i_query == DEMUX_SET_TIME )
++    if( i_query == DEMUX_GET_TIME )
++    {
++        /* Pictures timed at a rate from the start: the time is the next
++         * one's. */
++        if( !p_sys->b_timed )
++            return VLC_EGENERIC;
++        *va_arg( args, vlc_tick_t * ) = date_Get( &p_sys->output_dts ) - VLC_TICK_0;
++        return VLC_SUCCESS;
++    }
++    else if( i_query == DEMUX_SET_TIME )
+     {
+         /* With no index, the start is the one time a picture can be found
+          * at: its pictures are timed from it again. */
+@@ -528,10 +541,16 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             p_sys->p_packetizer->pf_flush( p_sys->p_packetizer );
+         date_Set( &p_sys->feed_dts, VLC_TICK_0 );
+         p_sys->output_dts = p_sys->feed_dts;
++        p_sys->b_timed = true;
+         return VLC_SUCCESS;
+     }
+     else
+-        return demux_vaControlHelper( p_demux->s,
+-                                       0, -1,
+-                                       0, 1, i_query, args );
++    {
++        int i_ret = demux_vaControlHelper( p_demux->s,
++                                           0, -1,
++                                           0, 1, i_query, args );
++        if( i_ret == VLC_SUCCESS && i_query == DEMUX_SET_POSITION )
++            p_sys->b_timed = false;
++        return i_ret;
++    }
+ }
+diff --git a/modules/demux/mpeg/mpgv.c b/modules/demux/mpeg/mpgv.c
+index 27f311a..671bac8 100644
+--- a/modules/demux/mpeg/mpgv.c
++++ b/modules/demux/mpeg/mpgv.c
+@@ -55,6 +55,11 @@ vlc_module_end ()
+ struct demux_sys_t
+ {
+     bool  b_start;
++    /* The time of the next picture, and whether its pictures are timed from
++     * its start: not after a seek elsewhere, which has no time to begin
++     * from. */
++    vlc_tick_t i_next_dts;
++    bool  b_timed;
+ 
+     es_out_id_t *p_es;
+ 
+@@ -117,6 +122,8 @@ static int Open( vlc_object_t * p_this )
+     p_demux->pf_control= Control;
+     p_demux->p_sys     = p_sys = malloc( sizeof( demux_sys_t ) );
+     p_sys->b_start     = true;
++    p_sys->i_next_dts  = VLC_TICK_0;
++    p_sys->b_timed     = true;
+     p_sys->p_es        = NULL;
+ 
+     /* Load the mpegvideo packetizer */
+@@ -171,6 +178,8 @@ static int Demux( demux_t *p_demux )
+             block_t *p_next = p_block_out->p_next;
+ 
+             es_out_SetPCR( p_demux->out, p_block_out->i_dts );
++            if( p_block_out->i_dts != VLC_TICK_INVALID )
++                p_sys->i_next_dts = p_block_out->i_dts + p_block_out->i_length;
+ 
+             p_block_out->p_next = NULL;
+             es_out_Send( p_demux->out, p_sys->p_es, p_block_out );
+@@ -188,7 +197,16 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
+     demux_sys_t *p_sys  = p_demux->p_sys;
+     /* FIXME calculate the bitrate */
+-    if( i_query == DEMUX_SET_TIME )
++    if( i_query == DEMUX_GET_TIME )
++    {
++        /* Pictures timed at a rate from the start: the time is the next
++         * one's. */
++        if( !p_sys->b_timed )
++            return VLC_EGENERIC;
++        *va_arg( args, vlc_tick_t * ) = p_sys->i_next_dts - VLC_TICK_0;
++        return VLC_SUCCESS;
++    }
++    else if( i_query == DEMUX_SET_TIME )
+     {
+         /* With no index, the start is the one time a picture can be found
+          * at: its pictures are timed from it again. */
+@@ -197,11 +215,18 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+         if( p_sys->p_packetizer->pf_flush )
+             p_sys->p_packetizer->pf_flush( p_sys->p_packetizer );
+         p_sys->b_start = true;
++        p_sys->i_next_dts = VLC_TICK_0;
++        p_sys->b_timed = true;
+         return VLC_SUCCESS;
+     }
+     else
+-        return demux_vaControlHelper( p_demux->s,
+-                                       0, -1,
+-                                       0, 1, i_query, args );
++    {
++        int i_ret = demux_vaControlHelper( p_demux->s,
++                                           0, -1,
++                                           0, 1, i_query, args );
++        if( i_ret == VLC_SUCCESS && i_query == DEMUX_SET_POSITION )
++            p_sys->b_timed = false;
++        return i_ret;
++    }
+ }
+ 
+-- 
+2.55.0
+

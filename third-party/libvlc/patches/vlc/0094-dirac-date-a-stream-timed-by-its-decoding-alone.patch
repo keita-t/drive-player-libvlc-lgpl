@@ -1,0 +1,106 @@
+From 1874e0c52292ed12526f55a7872df646db9db6f1 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 16:42:40 +0900
+Subject: [PATCH] dirac: date a stream timed by its decoding alone
+
+The raw Dirac demuxer dates the decoding of the first picture only, as
+the anchor the packetizer times the stream from. Given decoding times and
+no presentation time, the packetizer models the reorder buffer to find
+the order the pictures come out in, but never dates them: no picture was
+output, the clock never started, and an elementary Dirac or VC-2 stream
+showed nothing (its pictures came out at its end, undated, with "Invalid
+PCR value"). Neither did the missing decoding times follow the dated
+ones: the date they are counted on was never set from them. And each end
+of a sequence dropped the decoding times, so that the sequences after the
+first went undated: FFmpeg's VC-2 encoder ends a sequence after each
+picture.
+
+Count the missing decoding times on from the last one given, keep them
+through the end of a sequence, and present a picture with no presentation
+time of its sequence the delay of the modeled reorder buffer after its
+decoding, or as it is decoded when of the low delay syntax (VC-2), which
+reorders no picture: the next pictures of the sequence follow by their
+picture numbers, as when the container gives both times.
+---
+ modules/packetizer/dirac.c | 33 +++++++++++++++++++++++++++++++--
+ 1 file changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/modules/packetizer/dirac.c b/modules/packetizer/dirac.c
+index 726b59a..8f71ea2 100644
+--- a/modules/packetizer/dirac.c
++++ b/modules/packetizer/dirac.c
+@@ -157,6 +157,7 @@ struct decoder_sys_t
+         } u_picture_coding_mode;
+     } seq_hdr; /*< sequence header */
+     bool b_seen_seq_hdr; /* sequence header valid */
++    bool b_low_delay; /* last picture of the low delay syntax (not reordered) */
+     bool b_seen_eos; /* last data unit to be handled was an EOS */
+ };
+ 
+@@ -858,6 +859,7 @@ static int dirac_InspectDataUnit( decoder_t *p_dec, block_t **pp_block, block_t
+ 
+     if( dirac_isPicture( u_parse_code ) )
+     {
++        p_sys->b_low_delay = (u_parse_code & 0x88) == 0x88;
+         /* timestamps apply to pictures only */
+         p_eu->i_dts = p_sys->i_eu_dts;
+         p_eu->i_pts = p_sys->i_eu_pts;
+@@ -1083,7 +1085,9 @@ static int dirac_TimeGenPush( decoder_t *p_dec, block_t *p_block_in )
+      */
+     if( p_block_in->i_dts > VLC_TICK_INVALID )
+     do {
+-        /* if timestamps exist, sync to them */
++        /* if timestamps exist, sync to them: the next missing ones follow
++         * from this one */
++        date_Set( &p_sys->dts, p_block_in->i_dts );
+         if( p_sys->b_dts )
+             break;
+         /* first dts seen, backdate any packets in outqueue */
+@@ -1124,6 +1128,26 @@ static int dirac_TimeGenPush( decoder_t *p_dec, block_t *p_block_in )
+         p_block_in->i_dts = date_Increment( &p_sys->dts, 1 );
+     }
+ 
++    /* A stream timed by its decoding alone (the raw Dirac demuxer dates the
++     * decoding of its first picture only) was never given a presentation
++     * time: the reorder buffer below is modeled, but the pictures it puts out
++     * are not dated, and none was output. Present this picture the delay of
++     * the modeled reorder buffer after its decoding, as it is decoded when of
++     * the low delay syntax (VC-2), which reorders none; the next ones of the
++     * sequence follow by their picture numbers. */
++    if( !p_sys->b_pts && p_block_in->i_pts <= VLC_TICK_INVALID &&
++        p_block_in->i_dts > VLC_TICK_INVALID )
++    {
++        p_block_in->i_pts = p_block_in->i_dts +
++                            ( p_sys->b_low_delay ? 0 : p_sys->i_pts_offset );
++        p_sys->u_pts_picnum = u_picnum;
++        p_sys->i_pts = p_block_in->i_pts;
++        p_sys->b_pts = true;
++        date_t pts = p_sys->dts;
++        date_Set( &pts, p_sys->i_pts );
++        dirac_BackdatePTS( p_sys->p_outqueue, p_block_in, &pts, p_sys->u_pts_picnum );
++    }
++
+     if( p_sys->b_pts && p_block_in->i_pts <= VLC_TICK_INVALID )
+     {
+         /* pts has previously been seen, but not this time, interpolate */
+@@ -1322,11 +1346,16 @@ static block_t *Packetize( decoder_t *p_dec, block_t **pp_block )
+ 
+         /* reset timegen state (except synchronizer) */
+         p_sys->b_seen_seq_hdr = false;
++        /* The decoding times go on through the end of a sequence: a raw
++         * stream dates the decoding of its first picture only, and each
++         * sequence of one (a VC-2 stream of FFmpeg's ends each picture's
++         * sequence) would otherwise be left undated. A container's next
++         * dated picture sets them again. */
+         if( i_flushing < 2 )
+         {
+             /* this state isn't safe to loose if there was
+              * an unsignalled discontinuity */
+-            p_sys->b_pts = p_sys->b_dts = false;
++            p_sys->b_pts = false;
+         }
+         p_sys->b_tg_last_picnum = false;
+         dirac_ReorderInit( &p_sys->reorder_buf );
+-- 
+2.55.0
+

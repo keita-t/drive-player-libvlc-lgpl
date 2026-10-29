@@ -1,0 +1,72 @@
+From 57f3be839a4959aab54f3fb9667547705266d8bb Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 26 Oct 2026 03:03:39 +0900
+Subject: [PATCH] tta: seek to a time by its frames
+
+Without DEMUX_SET_TIME, the input sought a time as the same share of the
+bytes, and the stream landed at the start of the frame holding that byte:
+up to a frame (about a second) before the time, played from there. Seek
+to the frame the time falls in, and have a precise seek play from the time.
+Give each frame its length, so that the frame holding the target, which
+starts before it, is cut at the target rather than dropped as preroll.
+---
+ modules/demux/tta.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/modules/demux/tta.c b/modules/demux/tta.c
+index 7712313..740e65a 100644
+--- a/modules/demux/tta.c
++++ b/modules/demux/tta.c
+@@ -217,6 +217,14 @@ static int Demux( demux_t *p_demux )
+                                p_sys->pi_seektable[p_sys->i_currentframe] );
+     if( p_data == NULL ) return 0;
+     p_data->i_dts = p_data->i_pts = VLC_TICK_0 + (int64_t)(INT64_C(1000000) * p_sys->i_currentframe) * TTA_FRAMETIME;
++    /* To the next frame's time, or the last's to the length: without it,
++     * a frame holding a precise seek's target was taken for one before it,
++     * and none of it was played. */
++    int64_t i_end = (int64_t)(INT64_C(1000000) * (p_sys->i_currentframe + 1)) * TTA_FRAMETIME;
++    const int64_t i_length = INT64_C(1000000) * p_sys->i_datalength / p_sys->i_rate;
++    if( i_end > i_length )
++        i_end = i_length;
++    p_data->i_length = VLC_TICK_0 + i_end - p_data->i_pts;
+ 
+     p_sys->i_timeframe = p_sys->i_currentframe;
+     p_sys->i_currentframe++;
+@@ -274,6 +282,34 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             }
+             return VLC_EGENERIC;
+ 
++        case DEMUX_SET_TIME:
++        {
++            /* Without a seek to a time, the input sought the time's share of
++             * the length as a share of the bytes, and the stream landed at the
++             * start of the frame holding that byte: up to a frame, a second,
++             * before the time. Every frame but the last lasts TTA_FRAMETIME,
++             * so the time is in the frame its quotient counts. */
++            i64 = va_arg( args, int64_t );
++            bool b_precise = va_arg( args, int );
++            double f_frame = i64 / ( 1000000. * TTA_FRAMETIME );
++            uint32_t i_frame = p_sys->i_totalframes;
++            if( f_frame < p_sys->i_totalframes )
++                i_frame = f_frame > 0. ? f_frame : 0;
++            int64_t i_offset = p_sys->i_start;
++            for( uint32_t i = 0; i < i_frame; i++ )
++                i_offset += p_sys->pi_seektable[i];
++            if( vlc_stream_Seek( p_demux->s, i_offset ) )
++                return VLC_EGENERIC;
++            p_sys->i_currentframe = i_frame;
++            p_sys->i_timeframe = i_frame;
++            /* A precise seek decodes the frame from its start and plays from
++             * the time: the decoder cuts what of the frame comes before it. */
++            if( b_precise )
++                es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME,
++                                VLC_TICK_0 + i64 );
++            return VLC_SUCCESS;
++        }
++
+         case DEMUX_GET_LENGTH:
+             pi64 = va_arg( args, int64_t * );
+             /* The header counts the samples: the last frame holds only what
+-- 
+2.55.0
+

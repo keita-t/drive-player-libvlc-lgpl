@@ -1,0 +1,130 @@
+From ac419f5e4bd0e2a73af65d5af24906e2feed5a49 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:32:41 +0900
+Subject: [PATCH] avformat: hold the clock until each track played has had a
+ time
+
+The clock follows the earliest time of the tracks a packet came for, so
+that a track whose packets lag behind the others' is still played. A
+track none of whose packets came yet did not count: RealMedia lays its
+interleaved sound seconds behind its video, from the start and after a
+seek, and the clock started from the video had the sound come too late
+to be played, so that it stayed silent.
+
+While a selected track of sound or pictures has had no packet with a
+time, hold the clock, as long as the others are within ten seconds of
+their first time, the span a lagging track is waited for. A track not
+selected, or of subtitles, which may have no packet for minutes, is not
+waited for.
+---
+ modules/demux/avformat/demux.c | 42 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index bef8a56..739a731 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -63,6 +63,8 @@ struct avformat_track_s
+ {
+     es_out_id_t *p_es;
+     vlc_tick_t i_pcr;
++    /* Whether a packet with a time came since the demuxer opened or sought. */
++    bool b_timed;
+ };
+ 
+ /*****************************************************************************
+@@ -77,6 +79,8 @@ struct demux_sys_t
+     unsigned i_tracks;
+ 
+     int64_t         i_pcr;
++    /* The first time a packet had since the demuxer opened or sought. */
++    int64_t         i_first_dts;
+ 
+     unsigned    i_ssa_order;
+ 
+@@ -100,6 +104,7 @@ static int64_t IOSeek( void *opaque, int64_t offset, int whence );
+ 
+ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order );
+ static void UpdateSeekPoint( demux_t *p_demux, int64_t i_time );
++static bool IsPlayedTrack( demux_t *p_demux, unsigned i );
+ static void ResetTime( demux_t *p_demux, int64_t i_time );
+ static int ReopenAtStart( demux_t *p_demux );
+ 
+@@ -1038,7 +1043,13 @@ static int Demux( demux_t *p_demux )
+              pkt.stream_index, p_frame->i_dts, p_frame->i_pts );
+ #endif
+     if( p_frame->i_dts > VLC_TICK_INVALID && p_track->p_es != NULL )
++    {
+         p_track->i_pcr = p_frame->i_dts;
++        if( p_sys->i_first_dts <= VLC_TICK_INVALID )
++            p_sys->i_first_dts = p_frame->i_dts;
++    }
++    if( p_frame->i_dts > VLC_TICK_INVALID || p_frame->i_pts > VLC_TICK_INVALID )
++        p_track->b_timed = true;
+ 
+     int64_t i_ts_max = INT64_MIN;
+     for( unsigned i = 0; i < p_sys->i_tracks; i++ )
+@@ -1048,13 +1059,25 @@ static int Demux( demux_t *p_demux )
+     }
+ 
+     int64_t i_ts_min = INT64_MAX;
++    bool b_awaited = false;
+     for( unsigned i = 0; i < p_sys->i_tracks; i++ )
+     {
+         if( p_sys->tracks[i].p_es != NULL &&
+                 p_sys->tracks[i].i_pcr > VLC_TICK_INVALID &&
+                 p_sys->tracks[i].i_pcr + 10 * CLOCK_FREQ >= i_ts_max )
+             i_ts_min = __MIN( i_ts_min, p_sys->tracks[i].i_pcr );
++        else if( p_sys->tracks[i].p_es != NULL && !p_sys->tracks[i].b_timed &&
++                 IsPlayedTrack( p_demux, i ) )
++            b_awaited = true;
+     }
++    /* A file can lay a track's first packets well after the others' of the
++     * same time (RealMedia's interleaved sound, seconds behind its video, also
++     * after a seek): a clock started from the others' would have them come too
++     * late to be played. While a selected track has had no time, hold the clock,
++     * as for a track lagging behind, as long as the others are within the same
++     * ten seconds of their first time. */
++    if( b_awaited && i_ts_max <= p_sys->i_first_dts + 10 * CLOCK_FREQ )
++        i_ts_min = INT64_MAX;
+     if( i_ts_min >= p_sys->i_pcr && likely(i_ts_min != INT64_MAX) )
+     {
+         p_sys->i_pcr = i_ts_min;
+@@ -1071,6 +1094,21 @@ static int Demux( demux_t *p_demux )
+     return 1;
+ }
+ 
++/* Whether track [i] is sound or a picture the input plays: a track it has not
++ * selected, or one of subtitles, which may have no packet for minutes, has no
++ * time to be awaited. */
++static bool IsPlayedTrack( demux_t *p_demux, unsigned i )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    const enum AVMediaType type = p_sys->ic->streams[i]->codecpar->codec_type;
++    bool b_selected = false;
++
++    if( type != AVMEDIA_TYPE_AUDIO && type != AVMEDIA_TYPE_VIDEO )
++        return false;
++    es_out_Control( p_demux->out, ES_OUT_GET_ES_STATE, p_sys->tracks[i].p_es, &b_selected );
++    return b_selected;
++}
++
+ static void UpdateSeekPoint( demux_t *p_demux, int64_t i_time )
+ {
+     demux_sys_t *p_sys = p_demux->p_sys;
+@@ -1103,8 +1141,12 @@ static void ResetTime( demux_t *p_demux, int64_t i_time )
+         i_time = 1;
+ 
+     p_sys->i_pcr = i_time;
++    p_sys->i_first_dts = VLC_TICK_INVALID;
+     for( unsigned i = 0; i < p_sys->i_tracks; i++ )
++    {
+         p_sys->tracks[i].i_pcr = VLC_TICK_INVALID;
++        p_sys->tracks[i].b_timed = false;
++    }
+ 
+     if( i_time > VLC_TICK_INVALID )
+     {
+-- 
+2.55.0
+

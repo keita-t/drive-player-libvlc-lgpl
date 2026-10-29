@@ -1,0 +1,64 @@
+From c1825c26c088af57ade3164fbfe93457281eef47 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 22:08:57 +0900
+Subject: [PATCH] avi: take the length of a file without an index from its
+ header
+
+The demuxer counted a file's length from its index alone. A file whose
+index is missing, played as it is without one built, had no length: its
+position could not be shown, and a player waiting for one never played
+it. Its header still states it, by the frame count and the frame period.
+
+Take that length when no index gives one, and keep seeking such a file
+by the share of its bytes, as without a length: seeking it by time would
+read it through to find the place.
+---
+ modules/demux/avi/avi.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index 1d14869..e5813e7 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -176,6 +176,7 @@ struct demux_sys_t
+ {
+     vlc_tick_t i_time;
+     vlc_tick_t i_length;
++    bool       b_length_of_header; /* no index counted it: seek by bytes */
+ 
+     bool  b_interleaved;
+     bool  b_seekable;
+@@ -991,6 +992,21 @@ aviindex:
+         }
+     }
+ 
++    /* Without an index to count its frames, a file still states its length
++     * in its header, by its frame count and frame period: one whose index
++     * is missing, with no index built, keeps a length to show and to wait
++     * out. Its seeks stay found by the share of its bytes, as without one. */
++    if( p_sys->i_length == 0 && p_avih->i_totalframes > 0 &&
++        p_avih->i_microsecperframe > 0 )
++    {
++        p_sys->i_length = (vlc_tick_t)p_avih->i_totalframes *
++                          (vlc_tick_t)p_avih->i_microsecperframe *
++                          CLOCK_FREQ / 1000000;
++        p_sys->b_length_of_header = true;
++        msg_Dbg( p_demux, "length:%"PRId64" ms (based on the header)",
++                 p_sys->i_length * 1000 / CLOCK_FREQ );
++    }
++
+     if( p_sys->b_seekable )
+     {
+         /* we have read all chunk so go back to movi */
+@@ -1706,7 +1722,7 @@ static int Seek( demux_t *p_demux, vlc_tick_t i_date, int i_percent, bool b_accu
+             p_sys->b_indexloaded = true; /* we don't want to try each time */
+         }
+ 
+-        if( !p_sys->i_length )
++        if( !p_sys->i_length || p_sys->b_length_of_header )
+         {
+             avi_track_t *p_stream = NULL;
+             uint64_t i_pos;
+-- 
+2.55.0
+

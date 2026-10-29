@@ -1,0 +1,59 @@
+From 0aa826182a470c9d816a10b4092617e21dfd6d70 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:52:27 +0900
+Subject: [PATCH] nsv: find the start of a stream by its time
+
+An NSV stream's frames are timed from where the demuxer starts reading,
+with no index to find a time by, and its demuxer refused every time
+seek. A player starting it over from its start by time, as one does
+when a window comes, had its decoders flushed while the stream went on
+from where it was read: the second or so read ahead was lost, and the
+sound and the clock started that far in.
+
+Find the start by its time, where the first frame or the file header
+before it is, and time the frames from it again, as the demuxers of the
+elementary video streams do.
+---
+ modules/demux/nsv.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/modules/demux/nsv.c b/modules/demux/nsv.c
+index ae8b9e3..7b42280 100644
+--- a/modules/demux/nsv.c
++++ b/modules/demux/nsv.c
+@@ -72,6 +72,8 @@ struct demux_sys_t
+     int64_t     i_pcr;
+     int64_t     i_time;
+     int64_t     i_pcr_inc;
++    /* Where its first frame, or the file header before it, starts. */
++    uint64_t    i_start;
+ 
+     bool b_start_record;
+ };
+@@ -125,6 +127,7 @@ static int Open( vlc_object_t *p_this )
+     p_sys->i_pcr   = 0;
+     p_sys->i_time  = 0;
+     p_sys->i_pcr_inc = 0;
++    p_sys->i_start = vlc_stream_Tell( p_demux->s );
+ 
+     p_sys->b_start_record = false;
+ 
+@@ -417,6 +420,15 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+ 
+         case DEMUX_SET_TIME:
++            /* Its frames carry no time to search: the start is the one time
++             * a frame can be found at, and they are timed from it again. */
++            if( va_arg( args, int64_t ) != 0 ||
++                vlc_stream_Seek( p_demux->s, p_sys->i_start ) )
++                return VLC_EGENERIC;
++            p_sys->i_pcr = 0;
++            p_sys->i_time = 0;
++            return VLC_SUCCESS;
++
+         default:
+             return VLC_EGENERIC;
+     }
+-- 
+2.55.0
+

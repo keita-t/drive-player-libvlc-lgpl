@@ -1,0 +1,64 @@
+From 5c71db3f34f0c82f9f70b4657eab2bef21818dd9 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 29 Oct 2026 09:21:48 +0900
+Subject: [PATCH] input: say the time while waiting for the clock
+
+The input says its time only after a demux. Of an input it paces, it
+then waits for its clock to want more of the stream, as far as the
+demuxer's last reference, before it demuxes again. A demuxer that stamps
+a reference once a page, as Ogg does a second at a time (FFmpeg writes
+pages of a second), kept it waiting that long, and the time moved on a
+second at a time: still for up to 1.5 s for Vorbis, Opus and FLAC,
+against 0.5 s for MP3, and as far behind what was heard.
+
+Say the time while it waits, as often as while it demuxes: the time it
+says is where the clock plays, which moves on between the references.
+
+A stopped input's queue returns at once, as a deadline does; the wait
+that says the time ends the moment the input is stopped, not when the
+clock would have wanted more of the stream (up to a page of Ogg later).
+---
+ src/input/input.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/src/input/input.c b/src/input/input.c
+index ea64913..65fb8c0 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -814,6 +814,16 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
+         {
+             vlc_tick_t i_deadline = i_wakeup;
+ 
++            /* Playing, the input waits for its clock to want more of the
++             * stream, as far as the demuxer's last reference: a demuxer that
++             * stamps one a page, as Ogg does a second at a time, kept it
++             * waiting that long, and the time, said only after a demux, moved
++             * on a second at a time. Say the time as often while it waits:
++             * taken from the clock, it plays on between the references. */
++            const bool b_says_time = !b_paused && i_wakeup > 0 && i_intf_update < i_wakeup;
++            if( b_says_time )
++                i_deadline = i_intf_update;
++
+             /* Postpone seeking until ES buffering is complete or at most
+              * 125 ms. */
+             bool b_postpone = es_out_GetBuffering( input_priv(p_input)->p_es_out )
+@@ -837,6 +847,16 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
+             {
+                 if( b_postpone )
+                     continue;
++                /* A stopped input's queue returns at once, as a deadline does:
++                 * the input is to end now, not to say its time until the clock
++                 * would have wanted more of the stream. */
++                vlc_tick_t now = mdate();
++                if( b_says_time && now < i_wakeup && !input_Stopped( p_input ) )
++                {
++                    MainLoopStatistics( p_input );
++                    i_intf_update = now + INT64_C(250000);
++                    continue;
++                }
+                 break; /* Wake-up time reached */
+             }
+ 
+-- 
+2.55.0
+

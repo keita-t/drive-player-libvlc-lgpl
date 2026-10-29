@@ -1,0 +1,151 @@
+From cba26a8c46e45550f901d2d58868c7b17f61039b Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:49:13 +0900
+Subject: [PATCH 43/49] mp4: seek a fragment's samples to the sync sample
+ before the time
+
+A seek into a fragment moved each track to the sample at the time asked
+for, whether or not it was a sync sample. A fragment holds a group of
+pictures from its key picture on, so a video track started decoding from
+a picture that depends on those before it: nothing showed until the next
+fragment's key picture, and a start time inside a fragment showed the
+next one's. Fragments state which samples are sync samples in their
+sample flags (per sample, for the run's first sample, or as the tfhd or
+trex defaults); the seek now moves each track to the last sync sample at
+or before the time, and a precise seek shows from the time on, as it
+does for an unfragmented file.
+---
+ modules/demux/mp4/mp4.c | 55 +++++++++++++++++++++++++++++++++++++++++
+ modules/demux/mp4/mp4.h |  1 +
+ 2 files changed, 56 insertions(+)
+
+diff --git a/modules/demux/mp4/mp4.c b/modules/demux/mp4/mp4.c
+index 8733bd0..3de4710 100644
+--- a/modules/demux/mp4/mp4.c
++++ b/modules/demux/mp4/mp4.c
+@@ -167,6 +167,8 @@ static void MP4_GetDefaultSizeAndDuration( MP4_Box_t *p_moov,
+                                            const MP4_Box_data_tfhd_t *p_tfhd_data,
+                                            uint32_t *pi_default_size,
+                                            uint32_t *pi_default_duration );
++static uint32_t MP4_GetDefaultSampleFlags( MP4_Box_t *p_moov,
++                                           const MP4_Box_data_tfhd_t *p_tfhd_data );
+ 
+ static stime_t GetMoovTrackDuration( demux_sys_t *p_sys, unsigned i_track_ID );
+ 
+@@ -1751,6 +1753,19 @@ static unsigned GetSeekTrackIndex( demux_sys_t *p_sys )
+     return cand;
+ }
+ 
++/* Whether sample [i] of [p_data] is a sync sample, by its flags: its own, the
++ * run's first sample's, or the fragment's defaults (ISO/IEC 14496-12 8.8.3.1). */
++static bool FragTrunSampleIsSync( const mp4_track_t *p_track,
++                                  const MP4_Box_data_trun_t *p_data, uint32_t i )
++{
++    uint32_t i_flags = p_track->context.i_default_sample_flags;
++    if( p_data->i_flags & MP4_TRUN_SAMPLE_FLAGS )
++        i_flags = p_data->p_samples[i].i_flags;
++    else if( i == 0 && (p_data->i_flags & MP4_TRUN_FIRST_FLAGS) )
++        i_flags = p_data->i_first_sample_flags;
++    return !(i_flags & 0x00010000); /* sample_is_non_sync_sample */
++}
++
+ static void FragTrunSeekToTime( mp4_track_t *p_track, stime_t i_target_time )
+ {
+     if( !p_track->b_ok || p_track->context.runs.i_count < 1 )
+@@ -1761,6 +1776,15 @@ static void FragTrunSeekToTime( mp4_track_t *p_track, stime_t i_target_time )
+     uint64_t i_pos = p_track->context.runs.p_array[0].i_offset;
+     stime_t  i_time = p_track->context.runs.p_array[0].i_first_dts;
+ 
++    /* The last sync sample at or before the time, which a picture must be
++     * decoded from: the input shows from the time on when it is precise
++     * (ES_OUT_SET_NEXT_DISPLAY_TIME). Without one, the sample at the time. */
++    bool     b_sync = false;
++    unsigned i_sync_run = 0;
++    unsigned i_sync_sample = 0;
++    uint64_t i_sync_pos = 0;
++    stime_t  i_sync_time = 0;
++
+     for( unsigned r = 0; r < p_track->context.runs.i_count; r++ )
+     {
+         const mp4_run_t *p_run = &p_track->context.runs.p_array[r];
+@@ -1781,6 +1805,15 @@ static void FragTrunSeekToTime( mp4_track_t *p_track, stime_t i_target_time )
+             if( p_data->i_flags & MP4_TRUN_SAMPLE_DURATION )
+                 dur = p_data->p_samples[i].i_duration;
+ 
++            if( i_time <= i_target_time && FragTrunSampleIsSync( p_track, p_data, i ) )
++            {
++                b_sync = true;
++                i_sync_run = r;
++                i_sync_sample = i;
++                i_sync_pos = i_pos;
++                i_sync_time = i_time;
++            }
++
+             /* check condition */
+             if( i_time + dur > i_target_time )
+                 break;
+@@ -1794,6 +1827,14 @@ static void FragTrunSeekToTime( mp4_track_t *p_track, stime_t i_target_time )
+         }
+     }
+ 
++    if( b_sync )
++    {
++        i_run = i_sync_run;
++        i_sample = i_sync_sample;
++        i_pos = i_sync_pos;
++        i_time = i_sync_time;
++    }
++
+     p_track->context.i_trun_sample = i_sample;
+     p_track->context.i_trun_sample_pos = i_pos;
+     p_track->context.runs.i_current = i_run;
+@@ -4463,6 +4504,7 @@ static void FragResetContext( demux_sys_t *p_sys )
+         mp4_track_t *p_track = &p_sys->track[i];
+         p_track->context.i_default_sample_size = 0;
+         p_track->context.i_default_sample_duration = 0;
++        p_track->context.i_default_sample_flags = 0;
+     }
+ }
+ 
+@@ -4725,6 +4767,8 @@ static int FragCreateTrunIndex( demux_t *p_demux, MP4_Box_t *p_moof,
+                                        &i_track_defaultsampleduration );
+         p_track->context.i_default_sample_size = i_track_defaultsamplesize;
+         p_track->context.i_default_sample_duration = i_track_defaultsampleduration;
++        p_track->context.i_default_sample_flags =
++                MP4_GetDefaultSampleFlags( p_sys->p_moov, BOXDATA(p_tfhd) );
+ 
+         stime_t  i_traf_start_time = p_track->i_time;
+         bool     b_has_base_media_decode_time = false;
+@@ -4981,6 +5025,17 @@ static int FragGetMoofByTfraIndex( demux_t *p_demux, const vlc_tick_t i_target_t
+     return VLC_EGENERIC;
+ }
+ 
++/* The sample flags of a fragment's samples that state none of their own:
++ * its tfhd's, else its track's trex defaults. */
++static uint32_t MP4_GetDefaultSampleFlags( MP4_Box_t *p_moov,
++                                           const MP4_Box_data_tfhd_t *p_tfhd_data )
++{
++    if( p_tfhd_data->i_flags & MP4_TFHD_DFLT_SAMPLE_FLAGS )
++        return p_tfhd_data->i_default_sample_flags;
++    const MP4_Box_t *p_trex = MP4_GetTrexByTrackID( p_moov, p_tfhd_data->i_track_ID );
++    return p_trex ? BOXDATA(p_trex)->i_default_sample_flags : 0;
++}
++
+ static void MP4_GetDefaultSizeAndDuration( MP4_Box_t *p_moov,
+                                            const MP4_Box_data_tfhd_t *p_tfhd_data,
+                                            uint32_t *pi_default_size,
+diff --git a/modules/demux/mp4/mp4.h b/modules/demux/mp4/mp4.h
+index cf8cd8a..20ac609 100644
+--- a/modules/demux/mp4/mp4.h
++++ b/modules/demux/mp4/mp4.h
+@@ -154,6 +154,7 @@ typedef struct
+         /* tfhd defaults */
+         uint32_t i_default_sample_size;
+         uint32_t i_default_sample_duration;
++        uint32_t i_default_sample_flags;
+ 
+         struct
+         {
+-- 
+2.55.0
+

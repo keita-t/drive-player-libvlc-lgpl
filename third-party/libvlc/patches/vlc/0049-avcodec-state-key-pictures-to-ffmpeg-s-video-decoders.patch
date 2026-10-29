@@ -1,0 +1,38 @@
+From c49e92a1f9faa5ee3d3cb50fc1b98922831a268c Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 11:17:24 +0900
+Subject: [PATCH 49/49] avcodec: state key pictures to FFmpeg's video decoders
+
+The packets handed to FFmpeg's video decoders never stated a key
+picture, which FFmpeg's demuxers do and some of its decoders rely on.
+Flash Screen Video 2 keeps a key picture's data for the blocks of the
+pictures after it that refer to it: without the flag it kept none, and
+every such picture failed ("Inter frame without keyframe"), so the
+picture stayed on the last one that decoded whole. PNG, ZeroCodec and
+PDV take a packet without the flag as a difference to the picture
+before. A block flagged as an intra picture is now handed over as a key
+packet.
+---
+ modules/codec/avcodec/video.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 3b32987..971748c 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -1221,6 +1221,12 @@ static picture_t *DecodeBlock( decoder_t *p_dec, block_t **pp_block, bool *error
+                 pkt->size = p_block->i_buffer;
+                 pkt->pts = p_block->i_pts > VLC_TICK_INVALID ? p_block->i_pts : AV_NOPTS_VALUE;
+                 pkt->dts = p_block->i_dts > VLC_TICK_INVALID ? p_block->i_dts : AV_NOPTS_VALUE;
++                /* State a key picture as FFmpeg's demuxers do: some decoders
++                 * keep its data for the pictures that refer to it (Flash
++                 * Screen Video 2), or take a packet without the flag as a
++                 * difference to the picture before (PNG, ZeroCodec). */
++                if( p_block->i_flags & BLOCK_FLAG_TYPE_I )
++                    pkt->flags |= AV_PKT_FLAG_KEY;
+ 
+                 /* Make sure we don't reuse the same timestamps twice */
+                 p_block->i_pts =
+-- 
+2.55.0
+

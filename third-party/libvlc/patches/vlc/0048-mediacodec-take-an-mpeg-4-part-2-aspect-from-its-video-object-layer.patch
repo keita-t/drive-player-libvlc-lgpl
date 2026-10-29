@@ -1,0 +1,162 @@
+From 4e210496b139f5cd51f3bf0c6f40756963c243c4 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 11:12:13 +0900
+Subject: [PATCH 48/49] mediacodec: take an MPEG-4 Part 2 aspect from its video
+ object layer
+
+MediaCodec's output format omits the sample aspect, so an MPEG-4 Part 2
+input whose container declares none, as an OGM file's OggDS header,
+played square whatever its video object layer stated; FFmpeg's decoder
+takes it from there. Read aspect_ratio_info from the video object layer
+header in the extra data, or else, as an MPEG-2 output waits for its
+sequence header, defer the output and the codec to the first block and
+read it there; the opaque output then opens with that aspect.
+---
+ modules/codec/omxil/mediacodec.c | 95 +++++++++++++++++++++++++++++---
+ 1 file changed, 86 insertions(+), 9 deletions(-)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 7d89566..ad4e7cb 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -132,6 +132,8 @@ struct decoder_sys_t
+             unsigned int i_inflight_pictures;
+             timestamp_fifo_t *timestamp_fifo;
+             int i_mpeg_dar_num, i_mpeg_dar_den;
++            /* The sample aspect of the MPEG-4 Part 2 video object layer. */
++            unsigned i_mp4v_sar_num, i_mp4v_sar_den;
+         } video;
+         struct {
+             date_t i_end_date;
+@@ -480,6 +482,49 @@ static bool MPEG2_GetDar(const uint8_t *p, size_t i_size, int *pi_num, int *pi_d
+     return false;
+ }
+ 
++/* Whether an MPEG-4 Part 2 video object layer header in [p, p + i_size)
++ * states a sample aspect, as its aspect_ratio_info (ISO/IEC 14496-2 6.3.3),
++ * and that aspect in *pi_num:*pi_den. */
++static bool MP4V_GetSar(const uint8_t *p, size_t i_size,
++                        unsigned *pi_num, unsigned *pi_den)
++{
++    static const unsigned par[6][2] =
++        { {0,0}, {1,1}, {12,11}, {10,11}, {16,11}, {40,33} };
++
++    for (size_t i = 0; i + 4 < i_size; i++)
++    {
++        if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != 1 || (p[i + 3] & 0xf0) != 0x20)
++            continue;
++
++        bs_t s;
++        bs_init(&s, &p[i + 4], i_size - i - 4);
++        bs_skip(&s, 1);                     /* random_accessible_vol */
++        bs_skip(&s, 8);                     /* video_object_type_indication */
++        if (bs_read1(&s))                   /* is_object_layer_identifier */
++            bs_skip(&s, 7);
++        unsigned i_num, i_den;
++        const unsigned i_ar = bs_read(&s, 4);
++        if (i_ar == 0xf)                    /* extended: par_width, par_height */
++        {
++            i_num = bs_read(&s, 8);
++            i_den = bs_read(&s, 8);
++        }
++        else if (i_ar < 6)
++        {
++            i_num = par[i_ar][0];
++            i_den = par[i_ar][1];
++        }
++        else
++            return false;
++        if (bs_eof(&s) || !i_num || !i_den)
++            return false;
++        *pi_num = i_num;
++        *pi_den = i_den;
++        return true;
++    }
++    return false;
++}
++
+ static int UpdateVout(decoder_t *p_dec)
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -493,6 +538,15 @@ static int UpdateVout(decoder_t *p_dec)
+         p_dec->fmt_out.video.i_sar_den =
+             p_sys->video.i_mpeg_dar_den * p_dec->fmt_out.video.i_width;
+     }
++    else if (p_dec->fmt_in.i_codec == VLC_CODEC_MP4V &&
++             (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den) &&
++             p_sys->video.i_mp4v_sar_num && p_sys->video.i_mp4v_sar_den)
++    {
++        /* MediaCodec's output format omits SAR: an input that declares none
++         * takes the aspect of its video object layer. */
++        p_dec->fmt_out.video.i_sar_num = p_sys->video.i_mp4v_sar_num;
++        p_dec->fmt_out.video.i_sar_den = p_sys->video.i_mp4v_sar_den;
++    }
+     else if ((p_dec->fmt_in.i_codec == VLC_CODEC_H264 ||
+               p_dec->fmt_in.i_codec == VLC_CODEC_HEVC) &&
+              (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den))
+@@ -877,13 +931,30 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+      * the extra data when it holds one, otherwise from the block that brings
+      * one, the output is opened, and MediaCodec that renders into it started,
+      * once that block is parsed (DecodeBlock). */
++    bool b_start_on_first_block = false;
+     if (p_dec->fmt_out.i_codec == VLC_CODEC_ANDROID_OPAQUE
+-     && (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
+-      || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V)
+-     && (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den)
+-     && !MPEG2_GetDar(p_dec->fmt_in.p_extra, p_dec->fmt_in.i_extra,
+-                      &p_sys->video.i_mpeg_dar_num,
+-                      &p_sys->video.i_mpeg_dar_den))
++     && (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den))
++    {
++        switch (p_dec->fmt_in.i_codec)
++        {
++        case VLC_CODEC_MPGV:
++        case VLC_CODEC_MP2V:
++            b_start_on_first_block =
++                !MPEG2_GetDar(p_dec->fmt_in.p_extra, p_dec->fmt_in.i_extra,
++                              &p_sys->video.i_mpeg_dar_num,
++                              &p_sys->video.i_mpeg_dar_den);
++            break;
++        /* So does an MPEG-4 Part 2 stream in its video object layer header,
++         * in the extra data or else, as from an OGM file, in-band. */
++        case VLC_CODEC_MP4V:
++            b_start_on_first_block =
++                !MP4V_GetSar(p_dec->fmt_in.p_extra, p_dec->fmt_in.i_extra,
++                             &p_sys->video.i_mp4v_sar_num,
++                             &p_sys->video.i_mp4v_sar_den);
++            break;
++        }
++    }
++    if (b_start_on_first_block)
+     {
+         p_sys->b_start_on_first_block = true;
+     }
+@@ -1821,6 +1892,10 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
++    if (p_sys->b_start_on_first_block && p_dec->fmt_in.i_codec == VLC_CODEC_MP4V)
++        MP4V_GetSar(p_in_block->p_buffer, p_in_block->i_buffer,
++                    &p_sys->video.i_mp4v_sar_num, &p_sys->video.i_mp4v_sar_den);
++
+     /* An H.263 decoder is chosen by MIME type alone, and a codec stating
+      * only the profiles of the first H.263 version can fail on a picture with
+      * the extended picture type of version 2 after consuming input
+@@ -1886,9 +1961,11 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
+-    /* The first block a deferred MPEG-2 start can begin with has been parsed:
+-     * it states the aspect when it carries the sequence header; an intra
+-     * picture without one starts the output as it would have. */
++    /* The first block a deferred start can begin with has been parsed: it
++     * states the aspect when it carries the MPEG-2 sequence header or the
++     * MPEG-4 Part 2 video object layer; an MPEG-2 intra picture without one,
++     * or an MPEG-4 Part 2 block without one, starts the output as it would
++     * have. */
+     if (p_sys->b_start_on_first_block)
+     {
+         p_sys->b_start_on_first_block = false;
+-- 
+2.55.0
+

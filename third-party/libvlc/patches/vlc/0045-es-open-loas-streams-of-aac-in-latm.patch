@@ -1,0 +1,93 @@
+From 7742c9bc087100fc07757b8ec73b74ec76a8bef0 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:59:46 +0900
+Subject: [PATCH 45/49] es: open LOAS streams of AAC in LATM
+
+A LOAS stream, AAC in LATM with a sync header before each frame, as
+broadcasts carry it and FFmpeg's latm muxer writes it, was opened by no
+demuxer of VLC's own: the MPEG-4 audio packetizer reads LOAS, but the ES
+demuxer probed AAC only by its file extension, as ADTS. FFmpeg's demuxer
+opened it instead, without a length or seeking. The ES demuxer now
+takes a stream as LOAS when its first three frames each begin with the
+11-bit sync word where the frame before ends, and hands it to the
+packetizer as LATM; length and seeking come from its bitrate, as for
+the other streams it reads.
+---
+ modules/demux/mpeg/es.c | 47 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/modules/demux/mpeg/es.c b/modules/demux/mpeg/es.c
+index bb98bf3..61bde5d 100644
+--- a/modules/demux/mpeg/es.c
++++ b/modules/demux/mpeg/es.c
+@@ -171,6 +171,9 @@ static int MpgaInit( demux_t *p_demux );
+ static int AacProbe( demux_t *p_demux, int64_t *pi_offset );
+ static int AacInit( demux_t *p_demux );
+ 
++static int LoasProbe( demux_t *p_demux, int64_t *pi_offset );
++static int LoasInit( demux_t *p_demux );
++
+ static int EA52Probe( demux_t *p_demux, int64_t *pi_offset );
+ static int A52Probe( demux_t *p_demux, int64_t *pi_offset );
+ static int A52Init( demux_t *p_demux );
+@@ -187,6 +190,7 @@ static uint64_t SeekByMlltTable( demux_t *p_demux, vlc_tick_t *pi_time );
+ 
+ static const codec_t p_codecs[] = {
+     { VLC_CODEC_MP4A, false, "mp4 audio",  AacProbe,  AacInit },
++    { VLC_CODEC_MP4A, false, "mp4 audio",  LoasProbe, LoasInit },
+     { VLC_CODEC_MPGA, false, "mpeg audio", MpgaProbe, MpgaInit },
+     { VLC_CODEC_A52, true,  "a52 audio",  A52Probe,  A52Init },
+     { VLC_CODEC_EAC3, true,  "eac3 audio", EA52Probe, A52Init },
+@@ -1136,6 +1140,49 @@ static int AacInit( demux_t *p_demux )
+     return VLC_SUCCESS;
+ }
+ 
++/*****************************************************************************
++ * LOAS: AAC in LATM, each AudioMuxElement behind a 3-byte sync header
++ *****************************************************************************
++ * The 11-bit sync word is too short to tell a stream by one header, so the
++ * stream is taken as LOAS when its first frames each begin with one, each
++ * where the frame before ends.
++ *****************************************************************************/
++#define LOAS_HEADER_SIZE 3
++#define LOAS_PROBE_FRAMES 3
++static int LoasProbe( demux_t *p_demux, int64_t *pi_offset )
++{
++    const uint8_t *p_peek;
++    int i_frame = 0;
++
++    for( int i = 0; i < LOAS_PROBE_FRAMES; i++ )
++    {
++        int i_peek = vlc_stream_Peek( p_demux->s, &p_peek,
++                                      i_frame + LOAS_HEADER_SIZE );
++        if( i_peek < i_frame + LOAS_HEADER_SIZE )
++            return VLC_EGENERIC;
++
++        const uint8_t *p_header = &p_peek[i_frame];
++        if( p_header[0] != 0x56 || (p_header[1] & 0xe0) != 0xe0 )
++            return VLC_EGENERIC;
++        int i_size = ((p_header[1] & 0x1f) << 8) | p_header[2];
++        if( i_size == 0 )
++            return VLC_EGENERIC;
++        i_frame += LOAS_HEADER_SIZE + i_size;
++    }
++
++    *pi_offset = vlc_stream_Tell( p_demux->s );
++    return VLC_SUCCESS;
++}
++static int LoasInit( demux_t *p_demux )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++
++    p_sys->i_packet_size = 4096;
++    p_sys->i_original = VLC_FOURCC('L','A','T','M');
++
++    return VLC_SUCCESS;
++}
++
+ 
+ /*****************************************************************************
+  * A52
+-- 
+2.55.0
+

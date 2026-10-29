@@ -1,0 +1,41 @@
+From 13c1ad6f54313a87e4926f50150e2de17e043fc9 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:48:08 +0900
+Subject: [PATCH 42/49] image: leave an input typed as video to the demuxer of
+ its stream
+
+A Motion JPEG elementary stream begins like a JPEG picture, and the image
+demuxer, which is probed before the Motion JPEG one, opened it as a still:
+it loaded the whole stream and showed its first picture for the image
+duration. An input whose content type says it is video is a stream of
+pictures, so the image demuxer declines it unless it is forced.
+---
+ modules/demux/image.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/modules/demux/image.c b/modules/demux/image.c
+index b57ae76..0a4a821 100644
+--- a/modules/demux/image.c
++++ b/modules/demux/image.c
+@@ -668,6 +668,18 @@ static int Open(vlc_object_t *object)
+ {
+     demux_t *demux = (demux_t*)object;
+ 
++    /* An input typed as video is a stream of pictures, such as a Motion JPEG
++     * stream that begins like a JPEG picture: it is left to the demuxer of
++     * that stream, rather than shown as its first picture alone. */
++    if (!demux->obj.force)
++    {
++        char *type = stream_ContentType(demux->s);
++        bool video = type != NULL && !strncasecmp(type, "video/", 6);
++        free(type);
++        if (video)
++            return VLC_EGENERIC;
++    }
++
+     /* Detect the image type */
+     const image_format_t *img;
+ 
+-- 
+2.55.0
+

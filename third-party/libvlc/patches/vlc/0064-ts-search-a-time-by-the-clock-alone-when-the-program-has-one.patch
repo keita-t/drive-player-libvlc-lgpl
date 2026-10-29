@@ -1,0 +1,54 @@
+From 1658584b155fb4905d9abf6fea4e7a6c61487189 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 15:04:32 +0900
+Subject: [PATCH] ts: search a time by the clock alone when the program has one
+
+A seek by time searches the stream for the position of the time, and reads
+both the program's clock references and, in packets without one, the
+decoding timestamps of its streams as if they were the clock. A decoding
+timestamp leads the clock by the mux delay, most of a second in a stream
+muxed by FFmpeg. Where the clock is near the start, the timestamps read
+first always looked later than a time within that delay of it, and the
+search narrowed past the clock references that would have matched: a
+precise seek to between two seconds and two and a half, whose lead aims
+there, failed and fell back to the byte position, landing on a later key
+picture.
+
+Search a program that has clock references by them alone; one without
+keeps the decoding timestamps.
+---
+ modules/demux/mpeg/ts.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/mpeg/ts.c b/modules/demux/mpeg/ts.c
+index a530542..ad29f06 100644
+--- a/modules/demux/mpeg/ts.c
++++ b/modules/demux/mpeg/ts.c
+@@ -1961,6 +1961,14 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
+ 
+     const uint64_t i_initial_pos = vlc_stream_Tell( p_sys->stream );
+ 
++    /* A program with a clock is searched by it alone. A packet's decoding
++     * timestamp leads the clock by the mux delay, most of a second in a
++     * stream muxed by FFmpeg: taken for the clock where its PCR is due, a
++     * time within that delay of the start, as a precise seek's lead aims at,
++     * is never found. A program without one is searched by the timestamps. */
++    const bool b_pes_times = p_pmt->pcr.b_disable ||
++        GetPID( p_sys, p_pmt->i_pid_pcr )->probed.i_pcr_count == 0;
++
+     /* Find the time position by using binary search algorithm. */
+     uint64_t i_head_pos = 0;
+     uint64_t i_tail_pos = (uint64_t) i_stream_size - p_sys->i_packet_size;
+@@ -2006,7 +2014,8 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
+                     }
+                 }
+ 
+-                if( p_pkt->i_buffer > 4 && p_pkt->i_buffer > i_skip && i_pktpcr == TS_90KHZ_INVALID && p_pid->type == TYPE_STREAM &&
++                if( b_pes_times &&
++                    p_pkt->i_buffer > 4 && p_pkt->i_buffer > i_skip && i_pktpcr == TS_90KHZ_INVALID && p_pid->type == TYPE_STREAM &&
+                     ts_stream_Find_es( p_pid->u.p_stream, p_pmt ) &&
+                    (p_pkt->p_buffer[1] & 0xC0) == 0x40 && /* Payload start but not corrupt */
+                    (p_pkt->p_buffer[3] & 0xD0) == 0x10    /* Has payload but is not encrypted */
+-- 
+2.55.0
+

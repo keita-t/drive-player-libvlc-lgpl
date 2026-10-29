@@ -1,0 +1,39 @@
+From 4c8f408433d3fb5890769a8698e1fa05e6df9b3c Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 16:36:49 +0900
+Subject: [PATCH] dirac: keep the timestamps of the pictures an end of sequence
+ flushes
+
+At the end of a sequence, the packetizer puts out all it holds, those it
+could not date yet with the timestamps of the last unit put out. It gave
+those timestamps to the dated pictures too, discarding theirs: FFmpeg's
+VC-2 encoder ends a sequence after each picture, so that each picture
+went out with the timestamps of the one before, the first with none, and
+the stream was never dated.
+
+Give the previous timestamps to the units the flush finds undated only.
+---
+ modules/packetizer/dirac.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/modules/packetizer/dirac.c b/modules/packetizer/dirac.c
+index 79115f6..81450ad 100644
+--- a/modules/packetizer/dirac.c
++++ b/modules/packetizer/dirac.c
+@@ -1314,7 +1314,12 @@ static block_t *Packetize( decoder_t *p_dec, block_t **pp_block )
+             continue;
+         }
+ 
+-        if( i_flushing || p_block->i_flags & DIRAC_NON_DATED )
++        /* A flush puts out the pictures left undated with the previous
++         * timestamps too; those it finds dated keep their own (an end of
++         * sequence after each picture flushes each). */
++        if( p_block->i_flags & DIRAC_NON_DATED ||
++            ( i_flushing && ( p_block->i_pts <= VLC_TICK_INVALID ||
++                              p_block->i_dts <= VLC_TICK_INVALID ) ) )
+         {
+             p_block->i_dts = p_sys->i_dts_last_out;
+             p_block->i_pts = p_sys->i_pts_last_out;
+-- 
+2.55.0
+

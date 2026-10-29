@@ -1,0 +1,47 @@
+From ee03df6c9af0fe732f55a23b119d7df7c8708b9e Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 24 Oct 2026 16:52:09 +0900
+Subject: [PATCH] decoder: drop audio of a timeline a pending flush discards
+
+input_DecoderFlush() only marks a decoder flushing; its thread flushes the
+module later, and in between the module outputs what it decoded before the
+seek: a block of compressed audio decodes to several. Played into the
+output the seek empties, the first of them was taken for the first audio
+of the next timeline and placed on a clock already reset for it: from a
+buffering that read ahead, more than a second early, it had its lead
+played as silence, then flushed by the audio of the next timeline found
+that much late. A rapid seek played dozens of them.
+
+Drop audio while the decoder is flushing, as pictures are, checked with
+the owner lock held.
+---
+ src/input/decoder.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index a35d73b..8e02262 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -1223,6 +1223,19 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
+     assert( p_audio != NULL );
+ 
+     vlc_mutex_lock( &p_owner->lock );
++    /* Audio of a timeline a seek discarded must not count for the next one,
++     * as a picture must not: from input_DecoderFlush() until the decoder
++     * thread flushed its module, the module still outputs what it decoded
++     * before the seek. Played into the output the seek empties, it was taken
++     * for the first audio of the next timeline, placed on a clock already
++     * reset for it, and played or flushed out of turn. */
++    if( DecoderIsFlushingLocked( p_owner ) )
++    {
++        vlc_mutex_unlock( &p_owner->lock );
++        block_Release( p_audio );
++        return -1;
++    }
++
+     if( p_owner->i_preroll_end > p_audio->i_pts )
+     {
+         vlc_mutex_unlock( &p_owner->lock );
+-- 
+2.55.0
+

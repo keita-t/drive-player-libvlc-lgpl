@@ -1,0 +1,118 @@
+From 10edd5f350283aef03527e63be447ea01a283534 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 16:24:04 +0900
+Subject: [PATCH] mp4: read the color table a palettized QuickTime picture
+ describes
+
+A QuickTime picture of 1, 2, 4 or 8 bits whose color table id is 0 carries
+its color table in its sample description, between the fixed fields and the
+boxes in it. Neither was read: the decoder of a palettized codec such as
+Apple Graphics (SMC) was given no palette and drew every picture black, and
+the boxes after the table were parsed from its first bytes, so a pixel
+aspect (pasp) or field order (fiel) the description states was lost.
+
+Read the table into the track's palette, in the layout libavcodec takes it,
+and read the boxes after it.
+---
+ modules/demux/mp4/essetup.c | 10 +++++++++
+ modules/demux/mp4/libmp4.c  | 41 +++++++++++++++++++++++++++++++++++++
+ modules/demux/mp4/libmp4.h  |  3 +++
+ 3 files changed, 54 insertions(+)
+
+diff --git a/modules/demux/mp4/essetup.c b/modules/demux/mp4/essetup.c
+index d74e8f4..5f23b34 100644
+--- a/modules/demux/mp4/essetup.c
++++ b/modules/demux/mp4/essetup.c
+@@ -255,6 +255,16 @@ int SetupVideoES( demux_t *p_demux, mp4_track_t *p_track, MP4_Box_t *p_sample )
+     p_track->fmt.video.i_height = p_vide->i_height;
+     p_track->fmt.video.i_bits_per_pixel = p_vide->i_depth;
+ 
++    /* The palette of a palettized picture, from its description's color table */
++    free( p_track->fmt.video.p_palette );
++    p_track->fmt.video.p_palette = NULL;
++    if( p_vide->p_palette )
++    {
++        p_track->fmt.video.p_palette = malloc( sizeof(video_palette_t) );
++        if( p_track->fmt.video.p_palette )
++            *p_track->fmt.video.p_palette = *p_vide->p_palette;
++    }
++
+     /* fall on display size */
+     if( p_track->fmt.video.i_width <= 0 )
+         p_track->fmt.video.i_width = p_track->i_width;
+diff --git a/modules/demux/mp4/libmp4.c b/modules/demux/mp4/libmp4.c
+index 1f2468e..c3d0868 100644
+--- a/modules/demux/mp4/libmp4.c
++++ b/modules/demux/mp4/libmp4.c
+@@ -2792,6 +2792,41 @@ static int MP4_ReadBox_sample_soun( stream_t *p_stream, MP4_Box_t *p_box )
+ static void MP4_FreeBox_sample_vide( MP4_Box_t *p_box )
+ {
+     FREENULL( p_box->data.p_sample_vide->p_qt_image_description );
++    FREENULL( p_box->data.p_sample_vide->p_palette );
++}
++
++/* A palettized picture (1, 2, 4 or 8 bits) whose color table id is 0 carries
++ * its color table in its description, before the boxes in it: the first and
++ * last index and four 16-bit values for each, of which the red, the green and
++ * the blue are taken by their top 8 bits. */
++static video_palette_t *MP4_ReadQtColorTable( uint8_t **pp_peek,
++                                              uint64_t *pi_read )
++{
++    if( *pi_read < 8 )
++        return NULL;
++    const uint8_t *p_table = *pp_peek;
++    const uint32_t i_start = GetDWBE( p_table );
++    const uint16_t i_end = GetWBE( &p_table[6] );
++    if( i_start > i_end || i_end > 255 ||
++        *pi_read - 8 < (uint64_t)( i_end - i_start + 1 ) * 8 )
++        return NULL;
++
++    video_palette_t *p_palette = calloc( 1, sizeof(*p_palette) );
++    if( unlikely( p_palette == NULL ) )
++        return NULL;
++    const uint8_t *p_color = &p_table[8];
++    for( uint32_t i = i_start; i <= i_end; i++, p_color += 8 )
++    {
++        const uint32_t i_argb = 0xFF000000 | ( p_color[2] << 16 ) |
++                                ( p_color[4] << 8 ) | p_color[6];
++        memcpy( p_palette->palette[i], &i_argb, sizeof(i_argb) );
++    }
++    p_palette->i_entries = i_end + 1;
++
++    const uint64_t i_size = 8 + (uint64_t)( i_end - i_start + 1 ) * 8;
++    *pp_peek += i_size;
++    *pi_read -= i_size;
++    return p_palette;
+ }
+ 
+ int MP4_ReadBox_sample_vide( stream_t *p_stream, MP4_Box_t *p_box )
+@@ -2860,6 +2895,12 @@ int MP4_ReadBox_sample_vide( stream_t *p_stream, MP4_Box_t *p_box )
+         MP4_READBOX_EXIT( 0 );
+     }
+ 
++    const int i_bits = p_box->data.p_sample_vide->i_depth & 0x1F;
++    if( ( i_bits == 1 || i_bits == 2 || i_bits == 4 || i_bits == 8 ) &&
++        p_box->data.p_sample_vide->i_qt_color_table == 0 )
++        p_box->data.p_sample_vide->p_palette =
++            MP4_ReadQtColorTable( &p_peek, &i_read );
++
+     if( i_actually_read > 78 && p_peek - p_buff > 78 )
+     {
+         MP4_ReadBoxContainerRawInBox( p_stream, p_box, p_peek, i_read,
+diff --git a/modules/demux/mp4/libmp4.h b/modules/demux/mp4/libmp4.h
+index 13a1ccc..10339c8 100644
+--- a/modules/demux/mp4/libmp4.h
++++ b/modules/demux/mp4/libmp4.h
+@@ -723,6 +723,9 @@ typedef struct MP4_Box_data_sample_vide_s
+     int16_t  i_depth;
+ 
+     int16_t  i_qt_color_table;
++    /* The color table a palettized picture carries in its description, in
++     * the layout of libavcodec's: a native 32-bit ARGB for each entry */
++    video_palette_t *p_palette;
+ 
+     /* XXX hack ImageDescription */
+     int     i_qt_image_description;
+-- 
+2.55.0
+

@@ -1,0 +1,66 @@
+From 1dbca7a679a4438546721bd8a8ae58d784b4a3ac Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 15 Oct 2026 01:40:54 +0900
+Subject: [PATCH] mjpeg: time a file of pictures at a rate, and report its time
+
+A Motion JPEG stream that states no rate (mjpeg-fps 0) has its pictures
+timed by when they arrive, as a camera's live stream is. Read from a
+file, they all arrived at once: the stream played as fast as it was
+read, its time never moved, and the demuxer reported none. A seekable
+stream is now timed at 25 pictures a second, as es-fps times the other
+elementary streams, and the time of the next picture is reported.
+---
+ modules/demux/mjpeg.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/modules/demux/mjpeg.c b/modules/demux/mjpeg.c
+index 1a2ac82..e815ae8 100644
+--- a/modules/demux/mjpeg.c
++++ b/modules/demux/mjpeg.c
+@@ -65,6 +65,10 @@ static int MimeDemux( demux_t * );
+ static int MjpgDemux( demux_t * );
+ static int Control( demux_t *, int i_query, va_list args );
+ 
++/* The rate a file of pictures that states none is timed at, as es-fps times
++ * the other elementary streams. */
++#define MJPEG_FILE_FPS 25.f
++
+ struct demux_sys_t
+ {
+     es_format_t     fmt;
+@@ -380,7 +384,18 @@ static int Open( vlc_object_t * p_this )
+             f_fps = 1.f;
+     }
+     else
++    {
+         p_sys->b_still = false;
++        /* A file of pictures states no rate. Time it as the other elementary
++         * stream demuxers time one (es-fps), rather than by when its pictures
++         * arrive, as a camera's live stream is: a file's arrive at once, and
++         * neither its pictures nor its time would follow a clock. */
++        bool b_seekable = false;
++        if( f_fps == 0.f
++         && vlc_stream_Control( p_demux->s, STREAM_CAN_SEEK, &b_seekable ) == VLC_SUCCESS
++         && b_seekable )
++            f_fps = MJPEG_FILE_FPS;
++    }
+     p_sys->i_frame_length = f_fps ? (CLOCK_FREQ / f_fps) : 0;
+ 
+     es_format_Init( &p_sys->fmt, VIDEO_ES, VLC_CODEC_MJPG );
+@@ -560,5 +575,13 @@ static void Close ( vlc_object_t * p_this )
+  *****************************************************************************/
+ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
++    demux_sys_t *p_sys = p_demux->p_sys;
++
++    /* Pictures timed by a rate: the time is the next one's. */
++    if( i_query == DEMUX_GET_TIME && p_sys->i_frame_length && !p_sys->b_still )
++    {
++        *va_arg( args, vlc_tick_t * ) = p_sys->i_time - VLC_TICK_0;
++        return VLC_SUCCESS;
++    }
+     return demux_vaControlHelper( p_demux->s, 0, 0, 0, 0, i_query, args );
+ }
+-- 
+2.55.0
+

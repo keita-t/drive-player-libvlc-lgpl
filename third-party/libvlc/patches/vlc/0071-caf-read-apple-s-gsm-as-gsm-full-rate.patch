@@ -1,0 +1,36 @@
+From cf9bfe288ffb112825996eeecd99cd9c2ecfea14 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 20:20:44 +0900
+Subject: [PATCH] caf: read Apple's GSM as GSM full rate
+
+A CAF file names Apple's GSM, the full rate in frames of 33 bytes, by the
+format id 'agsm'. VLC names Microsoft's GSM, in pairs of 65, by the same
+fourcc, and the demuxer took the id as the codec: the decoder of
+Microsoft's GSM could not start on it, and the file played no sound. The
+mp4 demuxer already reads 'agsm' as GSM full rate.
+
+Read it as GSM full rate.
+---
+ modules/demux/caf.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/demux/caf.c b/modules/demux/caf.c
+index 387d5b9..d712cbf 100644
+--- a/modules/demux/caf.c
++++ b/modules/demux/caf.c
+@@ -489,6 +489,12 @@ static int ReadDescChunk( demux_t *p_demux )
+         es_format_Init( &p_sys->fmt, AUDIO_ES, vlc_fourcc_GetCodecAudio( VLC_CODEC_MP4A, 0 ));
+ 
+     }
++    else if( i_fmt == VLC_FOURCC( 'a', 'g', 's', 'm' ) )
++    {
++        /* Apple's GSM is full rate, in frames of 33 bytes: VLC names
++         * Microsoft's, in pairs of 65, by this fourcc */
++        es_format_Init( &p_sys->fmt, AUDIO_ES, VLC_CODEC_GSM );
++    }
+     else
+     {
+         es_format_Init( &p_sys->fmt, AUDIO_ES, vlc_fourcc_GetCodecAudio( i_fmt, 0 ));
+-- 
+2.55.0
+

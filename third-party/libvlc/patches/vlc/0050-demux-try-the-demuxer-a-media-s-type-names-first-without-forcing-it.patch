@@ -1,0 +1,56 @@
+From e0f320f3debf201b0bdae8c4e57140642b9e1078 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 17:03:42 +0900
+Subject: [PATCH 50/51] demux: try the demuxer a media's type names first,
+ without forcing it
+
+A stream with a type, as an HTTP response or an application states it,
+had the demuxer its type names in VLC's table (audio/mpeg, audio/aac,
+video/MP2T, video/dv...) loaded strictly: no other demuxer was tried,
+and the one named was forced, so it accepted bytes it would otherwise
+have declined. A type that does not match the bytes, as a file named
+.mp3 that holds AAC in MP4, then played as noise or not at all, where
+probing the bytes would have found its demuxer. The demuxer the type
+names is now tried first and unforced, and the others follow when it
+declines.
+---
+ src/input/demux.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/src/input/demux.c b/src/input/demux.c
+index 838ebe8..847f8bf 100644
+--- a/src/input/demux.c
++++ b/src/input/demux.c
+@@ -207,12 +207,17 @@ demux_t *demux_NewAdvanced( vlc_object_t *p_obj, input_thread_t *p_parent_input,
+ 
+     demux_t *p_demux = &priv->demux;
+ 
++    /* Look up demux by mime-type for hard to detect formats. The demuxer the
++     * type names is tried first, not forced: a type a server or an application
++     * gives may be wrong, and the other demuxers then probe the bytes as they
++     * would without it. */
++    const char *psz_preferred = NULL;
+     if( s != NULL && (!strcasecmp( psz_demux, "any" ) || !psz_demux[0]) )
+-    {   /* Look up demux by mime-type for hard to detect formats */
++    {
+         char *type = stream_MimeType( s );
+         if( type != NULL )
+         {
+-            psz_demux = demux_NameFromMimeType( type );
++            psz_preferred = demux_NameFromMimeType( type );
+             free( type );
+         }
+     }
+@@ -259,7 +264,8 @@ demux_t *demux_NewAdvanced( vlc_object_t *p_obj, input_thread_t *p_parent_input,
+         }
+ 
+         if( psz_module == NULL )
+-            psz_module = p_demux->psz_demux;
++            psz_module = psz_preferred != NULL ? psz_preferred
++                                               : p_demux->psz_demux;
+ 
+         p_demux->p_module = vlc_module_load(p_demux, "demux", psz_module,
+              !strcmp(psz_module, p_demux->psz_demux), demux_Probe, p_demux);
+-- 
+2.55.0
+

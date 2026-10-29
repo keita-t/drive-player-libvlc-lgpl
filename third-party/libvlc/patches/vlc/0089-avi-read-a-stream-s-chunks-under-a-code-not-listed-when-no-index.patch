@@ -1,0 +1,38 @@
+From 16cc72c11dc401ae5dee44a1fedb8629de257e29 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:53:59 +0900
+Subject: [PATCH] avi: read a stream's chunks under a code not listed when no
+ index
+
+A chunk is named by its stream's number and two characters saying what
+it holds, "dc" or "db" for video, "wb" for sound. Some writers use
+others (Indeo's "00iv"). Loading an index takes such a chunk for its
+stream's, but reading a file without one took it for none and skipped
+it: an AVI cut short of its index played its sound and never a picture.
+
+Take a chunk of a known stream under a code not listed for that stream's
+kind, as loading an index does.
+---
+ modules/demux/avi/avi.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index 40ba395..c881aa3 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -2469,6 +2469,12 @@ static int AVI_PacketGetHeader( demux_t *p_demux, avi_packet_t *p_pk )
+     memcpy( p_pk->i_peek, p_peek + 8, 8 );
+ 
+     AVI_ParseStreamHeader( p_pk->i_fourcc, &p_pk->i_stream, &p_pk->i_cat );
++    /* A chunk of a known stream under a code not listed (Indeo's "00iv") is
++     * that stream's, as loading an index takes it: reading a file without
++     * one would otherwise skip all of that stream. */
++    demux_sys_t *p_sys = p_demux->p_sys;
++    if( p_pk->i_cat == UNKNOWN_ES && p_pk->i_stream < p_sys->i_track )
++        p_pk->i_cat = p_sys->track[p_pk->i_stream]->fmt.i_cat;
+     return VLC_SUCCESS;
+ }
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,66 @@
+From fdc0d7a98ae207c83526648120cbb9e7175ff861 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 18:55:17 +0900
+Subject: [PATCH] es_out: have a demuxer read a video track left for the
+ application while nothing is selected
+
+An input whose video tracks are left for the application to select
+(video-autoselect off) has none selected until one is asked for. A
+demuxer that finds no track selected and knows no length to wait out
+ends the input: the AVI demuxer with no index, or one whose length rounds
+to no second, and the demuxer of fragmented MP4. A video-only input of
+theirs ended at its first demux, before the application could ask for
+its track, and so did one played without a window.
+
+While nothing of the input is selected, state its program's video tracks
+as selected to the demuxer: it reads them on, and their blocks find no
+decoder until one is asked for. An input with a selected track keeps
+reading only what is selected.
+---
+ src/input/es_out.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index 488a0b7..b008077 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -1683,6 +1683,27 @@ static bool EsIsSelected( es_out_id_t *es )
+         return es->p_dec != NULL;
+     }
+ }
++/* Whether a demuxer is to read [es]: selected, or, while nothing of the input
++ * is, a video track of its program that the input leaves for the application
++ * to ask for (video-autoselect off). A demuxer that finds no track to read ends
++ * the input when it knows no length to wait out (avi without an index, a
++ * fragmented mp4): a video-only input would end before its track is asked for,
++ * as one played without a window. Read, its blocks find no decoder. */
++static bool EsIsWanted( es_out_t *out, es_out_id_t *es )
++{
++    es_out_sys_t *p_sys = out->p_sys;
++
++    if( EsIsSelected( es ) )
++        return true;
++    if( es->fmt.i_cat != VIDEO_ES || p_sys->video.b_autoselect ||
++        es->p_pgrm != p_sys->p_pgrm )
++        return false;
++    for( int i = 0; i < p_sys->i_es; i++ )
++        if( EsIsSelected( p_sys->es[i] ) )
++            return false;
++    return true;
++}
++
+ static void EsCreateDecoder( es_out_t *out, es_out_id_t *p_es )
+ {
+     es_out_sys_t   *p_sys = out->p_sys;
+@@ -2304,7 +2325,7 @@ static int EsOutControlLocked( es_out_t *out, int i_query, va_list args )
+         es_out_id_t *es = va_arg( args, es_out_id_t * );
+         bool *pb = va_arg( args, bool * );
+ 
+-        *pb = EsIsSelected( es );
++        *pb = EsIsWanted( out, es );
+         return VLC_SUCCESS;
+     }
+ 
+-- 
+2.55.0
+

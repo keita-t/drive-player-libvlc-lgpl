@@ -1,0 +1,42 @@
+From e82d885862b764318551901d64f19f24fd80ff84 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 09:16:35 +0900
+Subject: [PATCH] avi: read a chunk found without an index only as its track's
+ next
+
+Reading a file without an index, the demuxer looks for the next chunk a
+track needs by walking the file, indexing each chunk it passes, and reads
+the first one of a track that can take data. A file laying its sound
+ahead of its pictures (an audio preload) has the walk pass chunks of
+sound indexed but not read yet; the demuxer read the one it found and
+moved the track to it, skipping those before: the sound jumped ahead,
+and the output filled the gaps with silence.
+
+Read a chunk found by the walk only as the next chunk of a track being
+read, and only index it otherwise, as for a track not selected.
+---
+ modules/demux/avi/avi.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index c881aa3..a576f3f 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -1429,8 +1429,12 @@ static int Demux_Seekable( demux_t *p_demux )
+                     index.i_lengthtotal = index.i_length;
+                     int64_t i_indexid = avi_index_Append( &tk->idx, &p_sys->i_movi_lastchunk_pos, &index );
+ 
+-                    /* do we will read this data ? */
+-                    if( i_indexid >= 0 &&
++                    /* do we will read this data ? Only as the next chunk of a
++                     * track being read: one with chunks found before and not read
++                     * yet, as sound a file lays ahead of its pictures, would skip
++                     * them, and one not read is only indexed. */
++                    if( i_indexid >= 0 && toread[i_track].b_ok &&
++                        (unsigned int) i_indexid == tk->i_idxposc &&
+                         AVI_GetDPTS( tk, toread[i_track].i_toread ) > -p_sys->i_read_increment )
+                     {
+                         tk->i_idxposc = (unsigned int) i_indexid;
+-- 
+2.55.0
+

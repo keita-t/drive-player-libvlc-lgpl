@@ -1,0 +1,34 @@
+From 3e6127b4721e403e8c3e28d04142511f271c615e Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 16:35:16 +0900
+Subject: [PATCH] avcodec: decode lossless JPEG with the decoder of motion
+ JPEG
+
+libavcodec has no decoder of its own for lossless JPEG: it decodes it, as
+every JPEG, with its decoder of motion JPEG, and its own demuxers give a
+stream tagged LJPG to that decoder. The codec id VLC asked for found none,
+and a lossless JPEG video, as FFmpeg's encoder writes one, showed nothing.
+
+Ask for the decoder of motion JPEG when there is none for lossless JPEG.
+---
+ modules/codec/avcodec/avcodec.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/modules/codec/avcodec/avcodec.c b/modules/codec/avcodec/avcodec.c
+index d0780e9..322fd16 100644
+--- a/modules/codec/avcodec/avcodec.c
++++ b/modules/codec/avcodec/avcodec.c
+@@ -286,6 +286,10 @@ AVCodecContext *ffmpeg_AllocContext( decoder_t *p_dec,
+     }
+     if( !p_codec )
+         p_codec = avcodec_find_decoder( i_codec_id );
++    /* libavcodec decodes lossless JPEG with its decoder of motion JPEG, as it
++     * does every JPEG: its own lossless JPEG is an encoder alone. */
++    if( !p_codec && i_codec_id == AV_CODEC_ID_LJPEG )
++        p_codec = avcodec_find_decoder( AV_CODEC_ID_MJPEG );
+     if( !p_codec )
+     {
+         msg_Dbg( p_dec, "codec not found (%s)", psz_namecodec );
+-- 
+2.55.0
+

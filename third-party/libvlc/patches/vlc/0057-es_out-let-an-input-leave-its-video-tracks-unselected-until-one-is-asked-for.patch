@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 16 Oct 2026 17:44:20 +0900
+Subject: [PATCH] es_out: let an input leave its video tracks unselected until
+ one is asked for
+
+The input selects a video track as soon as it finds it, and makes its
+decoder then. An application that makes its video window only once it
+knows the picture's size, from the track, has the decoder made before the
+window: MediaCodec cannot open its output without one, and the decoder
+that takes over (avcodec) decodes the stream in software for as long as
+it lives, also once the window has come.
+
+Add the option video-autoselect, on by default. Turned off, a video track
+is selected only when one is asked for (the video-es variable, as
+libvlc_video_set_track sets it), as a subtitle track is without a
+preference. Nothing else changes: video stays enabled, so subtitle tracks
+are selected as before, a demuxer that recreates a track keeps its
+selection, and a track asked for is decoded at once.
+---
+ src/input/es_out.c  | 9 ++++++++-
+ src/input/var.c     | 2 ++
+ src/libvlc-module.c | 9 +++++++++
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index 1295bf9..318fb8b 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -323,7 +323,14 @@ es_out_t *input_EsOutNew( input_thread_t *p_input, int i_rate )
+     TAB_INIT( p_sys->i_es, p_sys->es );
+ 
+     /* */
+-    EsOutPropsInit( &p_sys->video, true, p_input, ES_OUT_ES_POLICY_EXCLUSIVE,
++    /* An application can leave video tracks unselected until it asks for one
++     * (video-autoselect): one that makes its video window only once it knows
++     * the picture's size, from the track, would otherwise have the decoder
++     * made before the window, and a hardware decoder that renders into the
++     * window cannot open then. Video stays enabled, so subtitle tracks are
++     * selected as before, and a track asked for is decoded at once. */
++    EsOutPropsInit( &p_sys->video, var_InheritBool( p_input, "video-autoselect" ),
++                    p_input, ES_OUT_ES_POLICY_EXCLUSIVE,
+                     NULL, NULL, NULL, NULL );
+     EsOutPropsInit( &p_sys->audio, true, p_input, ES_OUT_ES_POLICY_EXCLUSIVE,
+                     "audio-track-id", "audio-track", "audio-language", "audio" );
+diff --git a/src/input/var.c b/src/input/var.c
+index 631b571..afaab50 100644
+--- a/src/input/var.c
++++ b/src/input/var.c
+@@ -438,6 +438,8 @@ void input_ConfigVarInit ( input_thread_t *p_input )
+ 
+         var_Create( p_input, "audio-track-id",
+                     VLC_VAR_INTEGER|VLC_VAR_DOINHERIT );
++        var_Create( p_input, "video-autoselect",
++                    VLC_VAR_BOOL|VLC_VAR_DOINHERIT );
+         var_Create( p_input, "sub-track-id",
+                     VLC_VAR_INTEGER|VLC_VAR_DOINHERIT );
+ 
+diff --git a/src/libvlc-module.c b/src/libvlc-module.c
+index 5634252..0443b38 100644
+--- a/src/libvlc-module.c
++++ b/src/libvlc-module.c
+@@ -609,6 +609,12 @@ static const char *const ppsz_clock_descriptions[] =
+ #define INPUT_SUBTRACK_ID_LONGTEXT N_( \
+     "Stream ID of the subtitle track to use.")
+ 
++#define INPUT_VIDEOAUTOSELECT_TEXT N_("Select video tracks automatically")
++#define INPUT_VIDEOAUTOSELECT_LONGTEXT N_( \
++    "Select a video track as soon as the input finds it, and decode it. " \
++    "Disabled, a video track is selected only when one is asked for, as a " \
++    "subtitle track is without a preference; video stays enabled.")
++
+ #define INPUT_CAPTIONS_TEXT N_(N_("Preferred Closed Captions decoder"))
+ static const int pi_captions[] = { 608, 708 };
+ static const char *const ppsz_captions[] = { "EIA/CEA 608", "CEA 708" };
+@@ -1738,6 +1744,9 @@ vlc_module_begin ()
+     add_integer( "audio-track-id", -1, INPUT_AUDIOTRACK_ID_TEXT,
+                  INPUT_AUDIOTRACK_ID_LONGTEXT, true )
+         change_safe ()
++    add_bool( "video-autoselect", true, INPUT_VIDEOAUTOSELECT_TEXT,
++              INPUT_VIDEOAUTOSELECT_LONGTEXT, true )
++        change_safe ()
+     add_integer( "sub-track-id", -1,
+                  INPUT_SUBTRACK_ID_TEXT, INPUT_SUBTRACK_ID_LONGTEXT, true )
+         change_safe ()

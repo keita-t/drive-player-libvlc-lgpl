@@ -1,0 +1,229 @@
+From 0b99b3f0ec7468c10675325716854aeb09c7bb93 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 24 Oct 2026 16:41:10 +0900
+Subject: [PATCH] decoder: cut the audio a precise seek lands before its target
+
+A precise seek has the input preroll the blocks before its target: the
+decoders decode them and show none of them. An audio block that starts
+before the target and ends past it is no preroll, and played from its
+start: a PCM track muxed by long blocks, as GXF lays out its sound in
+blocks of 680 ms, began up to that long before the target. The audio
+output took such a first block for one late past its deadline, and kept
+it, moving the shared clock to it: the picture stood still at the target
+for as long, and the sound played from before it. Without that, it was
+dropped whole, and the start of the new position lost.
+
+Have the decoder of such a block cut what of it comes before the target,
+when it decodes to PCM, as a preroll does for the blocks before it. The
+target is set as the block is sent, and cleared by a flush, which the
+input asks for before the seek that sets the next one.
+
+The buffering of a precise seek ends by the program clock, which a
+demuxer may take from its other tracks: an audio track it sends behind
+them, as Ogg sends its Vorbis pages, has not reached the target when it
+ends, and what it still sends before the target is no longer marked
+preroll. Played, it began the sound up to half a second before the
+target, and the audio output moved the shared clock to it as to such a
+late first block: the picture, already playing from the target, stood
+still for as long. Keep the target for an audio track that had not
+reached it when the buffering ended, and have its decoder cut what the
+track still sends before it, until a block reaches the target.
+---
+ src/input/decoder.c | 53 +++++++++++++++++++++++++++++++++++++++++++++
+ src/input/decoder.h |  7 ++++++
+ src/input/es_out.c  | 44 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 104 insertions(+)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 2dbaa7a..a35d73b 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -112,6 +112,9 @@ struct decoder_owner_sys_t
+     /* -- Theses variables need locking on read *and* write -- */
+     /* Preroll */
+     int64_t i_preroll_end;
++    /* The target of a precise seek that an audio block of the new position
++     * starts before: what of it plays before the target is cut */
++    int64_t i_audio_trim;
+     /* Pause */
+     vlc_tick_t pause_date;
+     unsigned frames_countdown;
+@@ -1227,6 +1230,40 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
+         return -1;
+     }
+ 
++    /* The first audio of a precise seek's new position may start before its
++     * target, in a block that also holds what follows it, too long to be
++     * prerolled whole: a PCM track muxed by long blocks (GXF, MXF). Cut what
++     * of it comes before the target, as a preroll does for the blocks before
++     * it. Kept, it was played from before the target; dropped, the start of
++     * the new position was lost. An audio track the demuxer sends behind the
++     * others has whole blocks before the target come after the buffering,
++     * no longer prerolled: they are dropped here, the target kept. */
++    if( p_owner->i_audio_trim > p_audio->i_pts )
++    {
++        const audio_format_t *fmt = &p_owner->fmt.audio;
++        if( fmt->i_rate > 0 && fmt->i_bytes_per_frame > 0
++         && fmt->i_frame_length == 1 && AOUT_FMT_LINEAR( fmt ) )
++        {
++            const uint64_t i_cut = ( p_owner->i_audio_trim - p_audio->i_pts )
++                                 * fmt->i_rate / CLOCK_FREQ;
++            if( i_cut >= p_audio->i_nb_samples )
++            {
++                vlc_mutex_unlock( &p_owner->lock );
++                block_Release( p_audio );
++                return -1;
++            }
++            const size_t i_bytes = i_cut * fmt->i_bytes_per_frame;
++            p_audio->p_buffer += i_bytes;
++            p_audio->i_buffer -= i_bytes;
++            p_audio->i_nb_samples -= i_cut;
++            p_audio->i_pts += i_cut * CLOCK_FREQ / fmt->i_rate;
++            if( p_audio->i_dts > VLC_TICK_INVALID )
++                p_audio->i_dts = p_audio->i_pts;
++            p_audio->i_length = p_audio->i_nb_samples * CLOCK_FREQ / fmt->i_rate;
++        }
++    }
++    p_owner->i_audio_trim = INT64_MIN;
++
+     prerolled = p_owner->i_preroll_end > INT64_MIN;
+     p_owner->i_preroll_end = INT64_MIN;
+     vlc_mutex_unlock( &p_owner->lock );
+@@ -1795,6 +1832,7 @@ static decoder_t * CreateDecoder( vlc_object_t *p_parent,
+         return NULL;
+     }
+     p_owner->i_preroll_end = INT64_MIN;
++    p_owner->i_audio_trim = INT64_MIN;
+     p_owner->i_last_rate = INPUT_RATE_DEFAULT;
+     p_owner->p_input = p_input;
+     p_owner->p_resource = p_resource;
+@@ -2240,10 +2278,25 @@ void input_DecoderDrain( decoder_t *p_dec )
+  * Requests that the decoder immediately discard all pending buffers.
+  * This is useful when seeking or when deselecting a stream.
+  */
++void input_DecoderSetAudioTrim( decoder_t *p_dec, vlc_tick_t i_target )
++{
++    decoder_owner_sys_t *p_owner = p_dec->p_owner;
++
++    vlc_mutex_lock( &p_owner->lock );
++    p_owner->i_audio_trim = i_target;
++    vlc_mutex_unlock( &p_owner->lock );
++}
++
+ void input_DecoderFlush( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+ 
++    /* A target set for the position the flush discards is no longer due;
++     * one set for the next position comes after the flush is asked for */
++    vlc_mutex_lock( &p_owner->lock );
++    p_owner->i_audio_trim = INT64_MIN;
++    vlc_mutex_unlock( &p_owner->lock );
++
+     vlc_fifo_Lock( p_owner->p_fifo );
+ 
+     /* Empty the fifo */
+diff --git a/src/input/decoder.h b/src/input/decoder.h
+index 4b66f96..d2b802e 100644
+--- a/src/input/decoder.h
++++ b/src/input/decoder.h
+@@ -48,6 +48,13 @@ void input_DecoderChangeDelay( decoder_t *, vlc_tick_t i_delay );
+  */
+ void input_DecoderStartWait( decoder_t * );
+ 
++/**
++ * Cut what of the next audio block comes before a precise seek's target: the
++ * block starting before it and ending after it, or one wholly before it that
++ * an audio track behind the others sends after the buffering.
++ */
++void input_DecoderSetAudioTrim( decoder_t *, vlc_tick_t i_target );
++
+ /**
+  * This function waits for the decoder to actually receive data.
+  */
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index 80aba63..ce407e8 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -95,6 +95,10 @@ struct es_out_id_t
+     decoder_t   *p_dec_record;
+ 
+     vlc_tick_t  i_pts_level;
++    /* The target of a precise seek this audio track had not reached when the
++     * buffering ended: what of it the demuxer still sends before the target
++     * is cut */
++    vlc_tick_t  i_audio_target;
+ 
+     /* Fields for Video with CC */
+     struct
+@@ -649,6 +653,7 @@ static void EsOutChangePosition( es_out_t *out )
+             }
+         }
+         p_es->i_pts_level = VLC_TICK_INVALID;
++        p_es->i_audio_target = -1;
+     }
+ 
+     for( int i = 0; i < p_sys->i_pgrm; i++ ) {
+@@ -710,6 +715,24 @@ static void EsOutDecodersStopBuffering( es_out_t *out, bool b_forced )
+ 
+     msg_Dbg( p_sys->p_input, "Stream buffering done (%d ms in %d ms)",
+               (int)(i_stream_duration/1000), (int)(i_system_duration/1000) );
++    /* The buffering ends by the program clock, which a demuxer may take from
++     * its other tracks: an audio track it sends behind them, as Ogg sends its
++     * Vorbis pages, has not reached the target yet, and what it still sends
++     * before the target is no longer marked preroll. Played, it began the
++     * sound before the target, and the audio output, taking its first block
++     * for one late past its deadline, moved the shared clock back to it: the
++     * picture already playing from the target stood still for as long. Keep
++     * the target for such a track, so that its decoder cuts that audio. */
++    for( int i = 0; i < p_sys->i_es; i++ )
++    {
++        es_out_id_t *p_es = p_sys->es[i];
++
++        p_es->i_audio_target = -1;
++        if( p_sys->i_preroll_end >= 0 && p_es->fmt.i_cat == AUDIO_ES
++         && ( p_es->i_pts_level == VLC_TICK_INVALID
++           || p_es->i_pts_level < p_sys->i_preroll_end ) )
++            p_es->i_audio_target = p_sys->i_preroll_end;
++    }
+     p_sys->b_buffering = false;
+     p_sys->i_preroll_end = -1;
+     p_sys->i_prev_stream_level = -1;
+@@ -1646,6 +1669,7 @@ static es_out_id_t *EsOutAddSlave( es_out_t *out, const es_format_t *fmt, es_out
+     es->cc.i_bitmap = 0;
+     es->p_master = p_master;
+     es->i_pts_level = VLC_TICK_INVALID;
++    es->i_audio_target = -1;
+ 
+     TAB_APPEND( p_sys->i_es, p_sys->es, es );
+ 
+@@ -2148,6 +2172,26 @@ static int EsOutSend( es_out_t *out, es_out_id_t *es, block_t *p_block )
+         if( i_date == VLC_TICK_INVALID ||
+             es->i_pts_level < p_sys->i_preroll_end )
+             p_block->i_flags |= BLOCK_FLAG_PREROLL;
++        /* An audio block that starts before the target and ends past it is
++         * no preroll, and plays from its start: have the decoder cut what of
++         * it comes before the target */
++        else if( es->fmt.i_cat == AUDIO_ES && es->p_dec != NULL
++              && i_date < p_sys->i_preroll_end )
++            input_DecoderSetAudioTrim( es->p_dec, p_sys->i_preroll_end );
++    }
++    /* An audio track behind the others when the buffering ended: cut what of
++     * it still comes before the target, until a block reaches the target */
++    else if( es->i_audio_target >= 0 )
++    {
++        const vlc_tick_t i_date = p_block->i_pts > VLC_TICK_INVALID
++                                ? p_block->i_pts : p_block->i_dts;
++        if( i_date > VLC_TICK_INVALID && i_date < es->i_audio_target )
++        {
++            if( es->p_dec != NULL )
++                input_DecoderSetAudioTrim( es->p_dec, es->i_audio_target );
++        }
++        else if( i_date > VLC_TICK_INVALID )
++            es->i_audio_target = -1;
+     }
+ 
+     if( !es->p_dec )
+-- 
+2.55.0
+

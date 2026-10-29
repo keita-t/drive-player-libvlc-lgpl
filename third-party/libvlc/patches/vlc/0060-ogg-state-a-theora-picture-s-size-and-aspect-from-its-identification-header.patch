@@ -1,0 +1,80 @@
+From 8074c73753b20a75b331c1ac044b5418306aabdf Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 07:46:44 +0900
+Subject: [PATCH 60/60] ogg: state a Theora picture's size and aspect from its
+ identification header
+
+The identification header states the coded frame, the picture shown in it
+and its pixel aspect, but the demuxer read past them and left the track
+without a size until a decoder described one. An input that leaves its
+video tracks unselected until a window is there makes the decoder only
+then, so a player could not shape that window from the track: it made one
+the size of the screen, and another once the decoder told the size, which
+started the picture over.
+
+Describe the picture as the theora decoder does: the frame, the picture in
+it with its offset from the top (the header counts it from the bottom), and
+the pixel aspect when the header states one, square otherwise.
+---
+ modules/demux/ogg.c | 37 +++++++++++++++++++++++++++++--------
+ 1 file changed, 29 insertions(+), 8 deletions(-)
+
+diff --git a/modules/demux/ogg.c b/modules/demux/ogg.c
+index e025b1f..79fb7a4 100644
+--- a/modules/demux/ogg.c
++++ b/modules/demux/ogg.c
+@@ -2742,22 +2742,43 @@ static bool Ogg_ReadTheoraHeader( logical_stream_t *p_stream,
+     i_minor = bs_read( &bitstream, 8 ); /* minor version num */
+     i_subminor = bs_read( &bitstream, 8 ); /* subminor version num */
+ 
+-    bs_read( &bitstream, 16 ) /*<< 4*/; /* width */
+-    bs_read( &bitstream, 16 ) /*<< 4*/; /* height */
+-    bs_read( &bitstream, 24 ); /* frame width */
+-    bs_read( &bitstream, 24 ); /* frame height */
+-    bs_read( &bitstream, 8 ); /* x offset */
+-    bs_read( &bitstream, 8 ); /* y offset */
++    const unsigned i_frame_width = bs_read( &bitstream, 16 ) << 4; /* in macro blocks */
++    const unsigned i_frame_height = bs_read( &bitstream, 16 ) << 4;
++    const unsigned i_pic_width = bs_read( &bitstream, 24 );
++    const unsigned i_pic_height = bs_read( &bitstream, 24 );
++    const unsigned i_pic_x = bs_read( &bitstream, 8 );
++    /* Counted from the bottom of the frame, which the decoder turns into an
++     * offset from its top as libtheora does. */
++    const unsigned i_pic_y_from_bottom = bs_read( &bitstream, 8 );
+ 
+     i_fps_numerator = bs_read( &bitstream, 32 );
+     i_fps_denominator = bs_read( &bitstream, 32 );
+     i_fps_denominator = __MAX( i_fps_denominator, 1 );
+-    bs_read( &bitstream, 24 ); /* aspect_numerator */
+-    bs_read( &bitstream, 24 ); /* aspect_denominator */
++    const unsigned i_aspect_num = bs_read( &bitstream, 24 );
++    const unsigned i_aspect_den = bs_read( &bitstream, 24 );
+ 
+     p_stream->fmt.video.i_frame_rate = i_fps_numerator;
+     p_stream->fmt.video.i_frame_rate_base = i_fps_denominator;
+ 
++    /* The picture as the decoder will describe it: the track states its size
++     * and aspect before a decoder exists, which an input that leaves its video
++     * tracks unselected until a window is there makes only then. A window
++     * made in the picture's shape from the start is not made again once a
++     * decoder states it. */
++    if( i_pic_width && i_pic_height &&
++        i_pic_x + i_pic_width <= i_frame_width &&
++        i_pic_y_from_bottom + i_pic_height <= i_frame_height )
++    {
++        p_stream->fmt.video.i_width = i_frame_width;
++        p_stream->fmt.video.i_height = i_frame_height;
++        p_stream->fmt.video.i_visible_width = i_pic_width;
++        p_stream->fmt.video.i_visible_height = i_pic_height;
++        p_stream->fmt.video.i_x_offset = i_pic_x;
++        p_stream->fmt.video.i_y_offset = i_frame_height - i_pic_height - i_pic_y_from_bottom;
++        p_stream->fmt.video.i_sar_num = i_aspect_num && i_aspect_den ? i_aspect_num : 1;
++        p_stream->fmt.video.i_sar_den = i_aspect_num && i_aspect_den ? i_aspect_den : 1;
++    }
++
+     bs_read( &bitstream, 8 ); /* colorspace */
+     p_stream->fmt.i_bitrate = bs_read( &bitstream, 24 );
+     bs_read( &bitstream, 6 ); /* quality */
+-- 
+2.55.0
+

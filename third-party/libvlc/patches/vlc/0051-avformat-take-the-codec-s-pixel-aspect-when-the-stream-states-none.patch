@@ -1,0 +1,43 @@
+From b84f09a781018aed91a947e5fd92e26c56f5fb59 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 17:20:54 +0900
+Subject: [PATCH 51/51] avformat: take the codec's pixel aspect when the stream
+ states none
+
+The demuxer took a video's pixel aspect from the stream alone, which
+containers such as GXF and MXF leave unset: their MPEG-2 states it in
+its sequence header, which FFmpeg reads into the codec's parameters.
+The track then declared none, so an output a decoder that reports no
+aspect opens (MediaCodec's) opened square, or opened only once the first
+picture arrived, too late for the window to take its shape before that
+picture was shown. FFmpeg's guess takes the stream's aspect, or else
+the codec parameters'.
+---
+ modules/demux/avformat/demux.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 3172812..5044271 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -530,9 +530,14 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+                 es_fmt.video.i_frame_rate_base = rate.den;
+             }
+ 
+-            es_fmt.video.i_sar_num = s->sample_aspect_ratio.num;
+-            if (s->sample_aspect_ratio.num > 0)
+-                es_fmt.video.i_sar_den = s->sample_aspect_ratio.den;
++            /* The container's pixel aspect, or else the one the codec's
++             * parameters state (as GXF and MXF leave it to their MPEG-2's
++             * sequence header): a decoder that reports none, as MediaCodec,
++             * would otherwise show it square until a picture says otherwise. */
++            AVRational sar = av_guess_sample_aspect_ratio( p_sys->ic, s, NULL );
++            es_fmt.video.i_sar_num = sar.num;
++            if (sar.num > 0)
++                es_fmt.video.i_sar_den = sar.den;
+             else
+                 es_fmt.video.i_sar_den = 0;
+             break;
+-- 
+2.55.0
+

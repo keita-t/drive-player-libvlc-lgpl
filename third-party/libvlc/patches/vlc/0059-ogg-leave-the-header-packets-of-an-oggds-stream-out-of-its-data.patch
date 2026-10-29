@@ -1,0 +1,45 @@
+From d7a1eb6028f5d033849ec5c41ef9546256998ecb Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 07:45:54 +0900
+Subject: [PATCH 59/60] ogg: leave the header packets of an OggDS stream out of
+ its data
+
+An OggDS stream's header packets, its stream header and its comments, are
+read again when a seek goes back to the stream's first pages, as a seek to
+its start does. The headers were backed up on the way in and the stream is
+no longer initializing, so the comment packet went to the decoder as the
+first block of data. MediaCodec's MPEG-4 Part 2 output, which opens with
+the aspect of the video object layer it finds in the first block, then
+found none, and an OGM whose container states no aspect played square.
+
+Drop a packet flagged as a header, after it has updated the clock as
+before.
+---
+ modules/demux/ogg.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/modules/demux/ogg.c b/modules/demux/ogg.c
+index 1c8ed68..e025b1f 100644
+--- a/modules/demux/ogg.c
++++ b/modules/demux/ogg.c
+@@ -1451,6 +1451,17 @@ static void Ogg_DecodePacket( demux_t *p_demux,
+     /* Convert the granulepos into the next pcr */
+     Ogg_UpdatePCR( p_demux, p_stream, p_oggpacket );
+ 
++    /* An OggDS stream's header packets, its stream header and its comments,
++     * are read again when a seek goes back to the stream's first pages, as a
++     * seek to its start does: they were taken as headers on the way in, and
++     * are no data. A decoder given one begins with it, before the first
++     * picture or sound: one that reads the stream's aspect from the first
++     * block it is given, as MediaCodec's MPEG-4 Part 2 output does from the
++     * video object layer, would find none there. */
++    if( p_stream->b_oggds && p_oggpacket->bytes > 0 &&
++        ( p_oggpacket->packet[0] & PACKET_TYPE_HEADER ) )
++        return;
++
+     if( !b_selected )
+     {
+         /* This stream isn't currently selected so we don't need to decode it,
+-- 
+2.55.0
+

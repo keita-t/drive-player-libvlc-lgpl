@@ -1,0 +1,84 @@
+From d7d0377986cb27e22ed7de8cf93f280b14f28bda Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 07:36:59 +0900
+Subject: [PATCH] es_out: report the time the clock plays past the demuxer's
+ end
+
+The time of an input is where its demuxer stands, less what the decoders
+have yet to play of it, and never past where it stands. A demuxer that
+hands over seconds of sound in one block stands at its start while they
+play: a file whose sound is one packet (MPEG-4 ALS stored as a single
+access unit) or whose packets carry no time (raw Shorten) is read to its
+end at once, and its time stayed at the start until it ended.
+
+Once the demuxer has reached its end, it sent all it had, and the
+decoders play on from it: let the time follow the clock past where it
+stands, as far as the length. A seek, which makes the demuxer read again,
+ends that.
+---
+ src/input/es_out.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index b008077..80aba63 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -171,6 +171,9 @@ struct es_out_sys_t
+ 
+     /* Used for buffering */
+     bool        b_buffering;
++    /* The demuxer reached its end: the decoders play on from what it sent,
++     * past where it last stood. */
++    bool        b_eos;
+     vlc_tick_t  i_buffering_extra_initial;
+     vlc_tick_t  i_buffering_extra_stream;
+     vlc_tick_t  i_buffering_extra_system;
+@@ -654,6 +657,7 @@ static void EsOutChangePosition( es_out_t *out )
+     }
+ 
+     p_sys->b_buffering = true;
++    p_sys->b_eos = false;
+     p_sys->i_buffering_extra_initial = 0;
+     p_sys->i_buffering_extra_stream = 0;
+     p_sys->i_buffering_extra_system = 0;
+@@ -903,7 +907,12 @@ static vlc_tick_t EsOutGetBuffering( es_out_t *out )
+         const vlc_tick_t i_consumed = i_system_duration * INPUT_RATE_DEFAULT / p_sys->i_rate - i_stream_duration;
+         i_delay = p_sys->i_pts_delay - i_consumed;
+     }
+-    if( i_delay < 0 )
++    /* Played past what the demuxer last read, the decoders are behind no
++     * more: the time is where it stands. At its end, it sent all it had,
++     * and they play on from it, as far as one block it timed at its start
++     * lasts (a file of a single packet, or of packets with no time): the
++     * time follows the clock past it. */
++    if( i_delay < 0 && !p_sys->b_eos )
+         return 0;
+     return i_delay;
+ }
+@@ -2915,11 +2924,15 @@ static int EsOutControlLocked( es_out_t *out, int i_query, va_list args )
+             i_time -= i_delay;
+             if( i_time < 0 )
+                 i_time = 0;
++            if( i_length > 0 && i_time > i_length )
++                i_time = i_length;
+ 
+             if( i_length > 0 )
+                 f_position -= (double)i_delay / i_length;
+             if( f_position < 0 )
+                 f_position = 0;
++            if( f_position > 1 )
++                f_position = 1;
+ 
+             input_SendEventPosition( p_sys->p_input, f_position, i_time );
+         }
+@@ -2977,6 +2990,7 @@ static int EsOutControlLocked( es_out_t *out, int i_query, va_list args )
+     }
+     case ES_OUT_SET_EOS:
+     {
++        p_sys->b_eos = true;
+         for (int i = 0; i < p_sys->i_es; i++) {
+             es_out_id_t *id = p_sys->es[i];
+             if (id->p_dec != NULL)
+-- 
+2.55.0
+

@@ -1,0 +1,122 @@
+From ab548f7612d3fdcb4ad85de935a114d58945ed1e Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 25 Oct 2026 12:32:30 +0900
+Subject: [PATCH] wav: read 4-bit adpcm at the rate its bits make
+
+The WAV demuxer left Yamaha ADPCM (format 0x0020) and G.722 (0x028F,
+which it did not map) to avformat, which seeks a WAV stream by the byte
+rate its header says. FFmpeg writes twice the stream's byte rate for
+both: a seek landed at twice its time, at the end of the stream from past
+its middle, and the playing ended there.
+
+Read them here and seek by the rate their 4 bits a sample make rather
+than the header's: Yamaha ADPCM in blocks of the header's alignment, a
+byte holding a sample of two channels or two samples of one; G.722, whose
+block is the byte coding a pair of its subbands' samples, 20 ms at once,
+as G.726.
+
+Yamaha ADPCM's decoder carries its state through the whole stream and
+starts again from nothing after a seek: what plays after a seek is the
+right part of the stream, decoded off its level until the end. G.722's
+catches up at once.
+---
+ include/vlc_codecs.h |  2 ++
+ modules/demux/wav.c  | 48 ++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 50 insertions(+)
+
+diff --git a/include/vlc_codecs.h b/include/vlc_codecs.h
+index acf98f9..34bcdfa 100644
+--- a/include/vlc_codecs.h
++++ b/include/vlc_codecs.h
+@@ -227,6 +227,7 @@ ATTR_PACKED
+ 
+ #define WAVE_FORMAT_ATRAC3              0x0270 /* Atrac3, != from MSDN doc */
+ #define WAVE_FORMAT_SONY_ATRAC3         0x0272 /* Atrac3, != from MSDN doc */
++#define WAVE_FORMAT_G722_ADPCM          0x028F /* G.722 ADPCM  */
+ 
+ #define WAVE_FORMAT_IMC                 0x0401
+ #define WAVE_FORMAT_INDEO_AUDIO         0x0402 /* Indeo Audio Coder */
+@@ -335,6 +336,7 @@ wave_format_tag_to_fourcc[] =
+     { WAVE_FORMAT_MSNAUDIO,         VLC_CODEC_GSM_MS,                 "Microsoft MSN Audio" },
+     { WAVE_FORMAT_G726,             VLC_CODEC_ADPCM_G726,             "G.726 ADPCM" },
+     { WAVE_FORMAT_G726_ADPCM,       VLC_CODEC_ADPCM_G726,             "G.726 ADPCM" },
++    { WAVE_FORMAT_G722_ADPCM,       VLC_CODEC_ADPCM_G722,             "G.722 ADPCM" },
+     { WAVE_FORMAT_G723_1,           VLC_CODEC_G723_1,                 "G.723.1" },
+     { WAVE_FORMAT_MSG723,           VLC_CODEC_G723_1,                 "Microsoft G.723 [G723.1]" },
+     { WAVE_FORMAT_VIVOG723,         VLC_CODEC_G723_1,                 "Vivo G.723.1" },
+diff --git a/modules/demux/wav.c b/modules/demux/wav.c
+index ba13526..5468192 100644
+--- a/modules/demux/wav.c
++++ b/modules/demux/wav.c
+@@ -85,6 +85,8 @@ static int ChunkFind( demux_t *, const char *, unsigned int * );
+ static int FrameInfo_IMA_ADPCM( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_MS_ADPCM ( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_Creative_ADPCM( unsigned int *, unsigned *, const es_format_t * );
++static int FrameInfo_Yamaha_ADPCM( unsigned int *, unsigned *, es_format_t * );
++static int FrameInfo_G722     ( unsigned int *, unsigned *, es_format_t * );
+ static int FrameInfo_PCM      ( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_MSGSM    ( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_G726     ( unsigned int *, unsigned *, const es_format_t * );
+@@ -373,6 +375,16 @@ static int Open( vlc_object_t * p_this )
+                                       &p_sys->fmt ) )
+             goto error;
+         break;
++    case VLC_CODEC_ADPCM_YAMAHA:
++        if( FrameInfo_Yamaha_ADPCM( &p_sys->i_frame_size, &p_sys->i_frame_samples,
++                                    &p_sys->fmt ) )
++            goto error;
++        break;
++    case VLC_CODEC_ADPCM_G722:
++        if( FrameInfo_G722( &p_sys->i_frame_size, &p_sys->i_frame_samples,
++                            &p_sys->fmt ) )
++            goto error;
++        break;
+     case VLC_CODEC_MPGA:
+     case VLC_CODEC_A52:
+         /* FIXME set end of area FIXME */
+@@ -640,6 +652,42 @@ static int FrameInfo_Creative_ADPCM( unsigned int *pi_size, unsigned *pi_samples
+     return VLC_SUCCESS;
+ }
+ 
++static int FrameInfo_Yamaha_ADPCM( unsigned int *pi_size, unsigned *pi_samples,
++                                   es_format_t *p_fmt )
++{
++    /* Yamaha ADPCM codes each sample on 4 bits, a byte holding a sample of
++     * two channels or two of one, so any whole block can be read alone. The
++     * byte rate a header says is not to be trusted: FFmpeg writes twice the
++     * stream's, and a seek by it landed at twice its time, at the end of the
++     * stream past the middle. The rate is the one its 4 bits make. */
++    if( p_fmt->audio.i_channels == 0 || p_fmt->audio.i_rate == 0 ||
++        p_fmt->audio.i_blockalign == 0 )
++        return VLC_EGENERIC;
++
++    p_fmt->i_bitrate = p_fmt->audio.i_rate * p_fmt->audio.i_channels * 4;
++    *pi_samples = p_fmt->audio.i_blockalign * 2 / p_fmt->audio.i_channels;
++    *pi_size = p_fmt->audio.i_blockalign;
++
++    return VLC_SUCCESS;
++}
++
++static int FrameInfo_G722( unsigned int *pi_size, unsigned *pi_samples,
++                           es_format_t *p_fmt )
++{
++    /* G.722 codes a pair of samples, of its two subbands, on a byte: 4 bits
++     * a sample at 16 kHz, 64 kb/s, whatever the header says (FFmpeg writes
++     * twice it, and a seek by it landed at twice its time). Its block is a
++     * byte: read 20 ms at once, as G.726, any byte starting a pair. */
++    if( p_fmt->audio.i_channels != 1 || p_fmt->audio.i_rate == 0 )
++        return VLC_EGENERIC;
++
++    p_fmt->i_bitrate = p_fmt->audio.i_rate * 4;
++    *pi_samples = __MAX( p_fmt->audio.i_rate / 50, 2 ) & ~1u;
++    *pi_size = *pi_samples / 2;
++
++    return VLC_SUCCESS;
++}
++
+ static int FrameInfo_MSGSM( unsigned int *pi_size, unsigned *pi_samples,
+                             const es_format_t *p_fmt )
+ {
+-- 
+2.55.0
+

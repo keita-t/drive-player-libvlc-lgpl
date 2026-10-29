@@ -1,0 +1,268 @@
+From 4ed588975050b2e319c25e2cb382d0b7551f20f4 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 09:18:39 +0900
+Subject: [PATCH] decoder: end a drain of the audio output when a seek flushes
+ the decoder
+
+At the end of its input, an audio decoder drains its output, which waits
+until what was written has been played: with the decoder up to two seconds
+ahead of the clock, a drain can last that long. A seek meanwhile flushes the
+decoder, but the decoder takes the flush only once the drain returns, and
+the input waits for its first new samples until then: the end of the old
+position plays on, the picture stands still, and the seek lands only after
+the drained audio has played out.
+
+Let a flush end a drain in progress. The audio output gains an optional
+drain_interrupt callback, called from the flushing thread without the
+output lock the draining thread holds; audiotrack implements it by ending
+its waits, leaving what it held to the discarding flush that follows, as
+after a drain that played out. The interruption holds until that flush, so
+one made as the drain begins ends it as well, and the decoder skips a drain
+once a flush is pending.
+
+A pause asked for during the drain waited behind it too, and now meets the
+flush at once: an audio decoder applies a pending pause before a pending
+flush, so that the flush leaves the output paused rather than playing it
+for an instant before the pause. A pending resume still follows the flush.
+---
+ include/vlc_aout.h                |  7 ++++++
+ modules/audio_output/audiotrack.c | 35 ++++++++++++++++++++++++++--
+ src/audio_output/aout_internal.h  |  1 +
+ src/audio_output/dec.c            | 12 ++++++++++
+ src/audio_output/output.c         |  1 +
+ src/input/decoder.c               | 38 +++++++++++++++++++++++++++++--
+ 6 files changed, 90 insertions(+), 4 deletions(-)
+
+diff --git a/include/vlc_aout.h b/include/vlc_aout.h
+index 5025c70..2becf17 100644
+--- a/include/vlc_aout.h
++++ b/include/vlc_aout.h
+@@ -152,6 +152,13 @@ struct audio_output
+       *             false to discard pending buffers (flush)
+       * \note A stream must have been started when called.
+       */
++    void (*drain_interrupt)(audio_output_t *);
++    /**< Ends a drain early (optional, may be NULL): a flush with wait in
++      * progress, or the next one, returns without waiting for what it would
++      * play, until a flush that discards follows, which discards it.
++      * \note Called from another thread than the drain's, which holds the
++      *       output lock meanwhile: only the module's own state may be used.
++      */
+     int (*volume_set)(audio_output_t *, float volume);
+     /**< Changes playback volume (optional, may be NULL).
+       * \param volume requested volume (0. = mute, 1. = nominal)
+diff --git a/modules/audio_output/audiotrack.c b/modules/audio_output/audiotrack.c
+index 7d7eee0..a6599e8 100644
+--- a/modules/audio_output/audiotrack.c
++++ b/modules/audio_output/audiotrack.c
+@@ -148,6 +148,8 @@ struct aout_sys_t {
+                              * Pause() */
+     bool b_thread_waiting;  /* If true, the thread is waiting for enough spaces
+                              * in AudioTrack internal buffers */
++    bool b_drain_interrupted; /* A drain ends at once until a discarding
++                               * flush, see DrainInterrupt() */
+ 
+     uint64_t i_samples_written; /* Number of samples written since last flush */
+     bool b_audiotrack_exception; /* True if audiotrack threw an exception */
+@@ -1525,6 +1527,7 @@ Stop( audio_output_t *p_aout )
+     p_sys->b_audiotrack_exception = false;
+     p_sys->b_error = false;
+     p_sys->b_passthrough = false;
++    p_sys->b_drain_interrupted = false;
+ }
+ 
+ /**
+@@ -2024,7 +2027,7 @@ AudioTrack_WaitPlayed( JNIEnv *env, audio_output_t *p_aout )
+ 
+     const vlc_tick_t i_deadline = mdate() + DRAIN_MARGIN_US
+         + FRAMES_TO_US( p_sys->i_samples_written - i_pos );
+-    while( !p_sys->b_error && !p_sys->b_thread_paused
++    while( !p_sys->b_error && !p_sys->b_thread_paused && !p_sys->b_drain_interrupted
+         && AudioTrack_getPlaybackHeadPosition( env, p_aout )
+            < p_sys->i_samples_written )
+     {
+@@ -2040,6 +2043,23 @@ AudioTrack_WaitPlayed( JNIEnv *env, audio_output_t *p_aout )
+     }
+ }
+ 
++/**
++ * End a drain early, from the thread of a seek: the drain stops waiting for
++ * what it would play, which the seek's flush discards. Kept until that
++ * discarding flush, so that one called just before the drain begins ends it
++ * too.
++ */
++static void
++DrainInterrupt( audio_output_t *p_aout )
++{
++    aout_sys_t *p_sys = p_aout->sys;
++
++    vlc_mutex_lock( &p_sys->lock );
++    p_sys->b_drain_interrupted = true;
++    vlc_cond_broadcast( &p_sys->aout_cond );
++    vlc_mutex_unlock( &p_sys->lock );
++}
++
+ static void
+ Flush( audio_output_t *p_aout, bool b_wait )
+ {
+@@ -2048,6 +2068,11 @@ Flush( audio_output_t *p_aout, bool b_wait )
+ 
+     vlc_mutex_lock( &p_sys->lock );
+ 
++    /* A discarding flush is the one a seek's interruption of a drain waits
++     * for: later drains play out again. */
++    if( !b_wait )
++        p_sys->b_drain_interrupted = false;
++
+     if( p_sys->b_error || !( env = GET_ENV() ) )
+         goto bailout;
+ 
+@@ -2065,7 +2090,7 @@ Flush( audio_output_t *p_aout, bool b_wait )
+     if( b_wait )
+     {
+         /* Wait for the thread to process the circular buffer */
+-        while( !p_sys->b_error
++        while( !p_sys->b_error && !p_sys->b_drain_interrupted
+             && p_sys->circular.i_read != p_sys->circular.i_write )
+             vlc_cond_wait( &p_sys->aout_cond, &p_sys->lock );
+         if( p_sys->b_error )
+@@ -2073,6 +2098,11 @@ Flush( audio_output_t *p_aout, bool b_wait )
+ 
+         AudioTrack_WaitPlayed( env, p_aout );
+ 
++        /* Ended early by a seek: what the track holds is the discarding
++         * flush's, which follows, as it follows a drain that played out. */
++        if( p_sys->b_drain_interrupted )
++            goto bailout;
++
+         JNI_AT_CALL_VOID( stop );
+         if( CHECK_AT_EXCEPTION( "stop" ) )
+             goto bailout;
+@@ -2269,6 +2299,7 @@ Open( vlc_object_t *obj )
+     p_aout->play = Play;
+     p_aout->pause = Pause;
+     p_aout->flush = Flush;
++    p_aout->drain_interrupt = DrainInterrupt;
+     p_aout->time_get = TimeGet;
+     p_aout->device_select = DeviceSelect;
+ 
+diff --git a/src/audio_output/aout_internal.h b/src/audio_output/aout_internal.h
+index d710515..81acdd8 100644
+--- a/src/audio_output/aout_internal.h
++++ b/src/audio_output/aout_internal.h
+@@ -161,6 +161,7 @@ int aout_DecPlay(audio_output_t *, block_t *, int i_input_rate,
+ void aout_DecGetResetStats(audio_output_t *, unsigned *, unsigned *);
+ void aout_DecChangePause(audio_output_t *, bool b_paused, vlc_tick_t i_date);
+ void aout_DecFlush(audio_output_t *, bool wait);
++void aout_DecInterruptDrain(audio_output_t *);
+ void aout_RequestRestart (audio_output_t *, unsigned);
+ 
+ static inline void aout_InputRequestRestart(audio_output_t *aout)
+diff --git a/src/audio_output/dec.c b/src/audio_output/dec.c
+index 8b1dd5a..c2f7459 100644
+--- a/src/audio_output/dec.c
++++ b/src/audio_output/dec.c
+@@ -481,6 +481,18 @@ void aout_DecFlush (audio_output_t *aout, bool wait)
+     aout_OutputUnlock (aout);
+ }
+ 
++/**
++ * Ends a drain of the output early, from another thread than the one that
++ * drains it (aout_DecFlush() with wait): it returns without waiting for what
++ * it would play, which a flush that discards then discards. The drain holds
++ * the output lock, so this does not take it.
++ */
++void aout_DecInterruptDrain (audio_output_t *aout)
++{
++    if (aout->drain_interrupt != NULL)
++        aout->drain_interrupt (aout);
++}
++
+ void aout_ChangeViewpoint(audio_output_t *aout,
+                           const vlc_viewpoint_t *p_viewpoint)
+ {
+diff --git a/src/audio_output/output.c b/src/audio_output/output.c
+index bb8e4c3..66481a8 100644
+--- a/src/audio_output/output.c
++++ b/src/audio_output/output.c
+@@ -238,6 +238,7 @@ audio_output_t *aout_New (vlc_object_t *parent)
+     /* Audio output module initialization */
+     aout->start = NULL;
+     aout->stop = NULL;
++    aout->drain_interrupt = NULL;
+     aout->volume_set = NULL;
+     aout->mute_set = NULL;
+     aout->device_select = NULL;
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 0adc228..2dbaa7a 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -132,6 +132,7 @@ struct decoder_owner_sys_t
+     /* Flushing */
+     bool flushing;
+     bool b_draining;
++    bool b_output_draining; /* the audio output drains, under lock */
+     atomic_bool drained;
+     bool b_idle;
+ 
+@@ -1640,7 +1641,14 @@ static void *DecoderThread( void *p_data )
+ 
+     for( ;; )
+     {
+-        if( p_owner->flushing )
++        /* An audio output asked to pause before a flush pauses first: flushed
++         * while still playing, it would play on for the instant until the
++         * pause, a click once the seek has emptied it. This comes about when
++         * a seek ends a drain the pause waited behind (input_DecoderFlush). A
++         * resume still waits for the flush, as below. */
++        const bool b_pause_first = p_owner->fmt.i_cat == AUDIO_ES
++                                && p_owner->paused && !paused;
++        if( p_owner->flushing && !b_pause_first )
+         {   /* Flush before/regardless of pause. We do not want to resume just
+              * for the sake of flushing (glitches could otherwise happen). */
+             int canc = vlc_savecancel();
+@@ -1723,7 +1731,23 @@ static void *DecoderThread( void *p_data )
+         {   /* Draining: the decoder is drained and all decoded buffers are
+              * queued to the output at this point. Now drain the output. */
+             if( p_owner->p_aout != NULL )
+-                aout_DecFlush( p_owner->p_aout, true );
++            {
++                /* A drain plays what the output holds, up to the decoder's
++                 * lead on the clock, which a seek asked for meanwhile would
++                 * wait for: the flush ends it (input_DecoderFlush). One asked
++                 * for before it began skips it. */
++                vlc_mutex_lock( &p_owner->lock );
++                p_owner->b_output_draining = true;
++                vlc_mutex_unlock( &p_owner->lock );
++                vlc_fifo_Lock( p_owner->p_fifo );
++                const bool b_flushing = p_owner->flushing;
++                vlc_fifo_Unlock( p_owner->p_fifo );
++                if( !b_flushing )
++                    aout_DecFlush( p_owner->p_aout, true );
++                vlc_mutex_lock( &p_owner->lock );
++                p_owner->b_output_draining = false;
++                vlc_mutex_unlock( &p_owner->lock );
++            }
+         }
+         vlc_restorecancel( canc );
+ 
+@@ -2254,6 +2278,16 @@ void input_DecoderFlush( decoder_t *p_dec )
+     vlc_cond_signal( &p_owner->wait_timed );
+ 
+     vlc_fifo_Unlock( p_owner->p_fifo );
++
++    /* A drain of the audio output in progress would play out what this flush
++     * discards before the decoder takes the flush, up to its lead on the
++     * clock, while the input waits for it: end it now. Marked before the
++     * decoder reads the flushing state above, a drain is either ended here
++     * or not begun (DecoderThread). */
++    vlc_mutex_lock( &p_owner->lock );
++    if( p_owner->b_output_draining && p_owner->p_aout != NULL )
++        aout_DecInterruptDrain( p_owner->p_aout );
++    vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
+ void input_DecoderGetCcDesc( decoder_t *p_dec, decoder_cc_desc_t *p_desc )
+-- 
+2.55.0
+

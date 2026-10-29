@@ -1,0 +1,253 @@
+From 8654a81fb6f61be06c1c3611faef4d53e93a02d2 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:58:09 +0900
+Subject: [PATCH 44/49] voc: take times, length and seeks across all the blocks
+
+A VOC file's sound may be split into many blocks, as FFmpeg writes it:
+a block a packet. Time, length and seeks were those of the block being
+read, as if it were the whole file: the time went back to zero at each
+block, the length was a block's, and a seek moved within that block
+only. The time is now that of the samples read since the first block,
+the length that of the last block's end once read, estimated until then
+from the rest of the file taken as blocks like the current one, and a
+seek finds its time block by block: from the first block for a time
+behind, reading on otherwise, each block's data skipped unread. A file
+with a repeat block plays parts again, so its times leave the file's
+order: it is not seekable and has no length until its end.
+---
+ modules/demux/voc.c | 182 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 174 insertions(+), 8 deletions(-)
+
+diff --git a/modules/demux/voc.c b/modules/demux/voc.c
+index 3673449..6e1a88f 100644
+--- a/modules/demux/voc.c
++++ b/modules/demux/voc.c
+@@ -68,6 +68,15 @@ struct demux_sys_t
+     unsigned        i_silence_countdown;
+ 
+     date_t          pts;
++
++    /* Where the first block begins, whether a repeat block made the times
++     * leave the file's order, when the last block ends once the demuxer read
++     * that far, and the length estimated before then (VLC_TICK_INVALID while
++     * unknown). */
++    int64_t         i_data_start;
++    bool            b_repeats;
++    vlc_tick_t      i_end_time;
++    vlc_tick_t      i_length;
+ };
+ 
+ static const char ct_header[] = "Creative Voice File\x1a";
+@@ -116,12 +125,16 @@ static int Open( vlc_object_t * p_this )
+     if( p_sys == NULL )
+         return VLC_ENOMEM;
+ 
+-    p_sys->i_silence_countdown = p_sys->i_block_start = p_sys->i_block_end =
+-    p_sys->i_loop_count = 0;
++    p_sys->i_silence_countdown = p_sys->i_loop_count = 0;
++    p_sys->i_data_start = p_sys->i_block_start = p_sys->i_block_end =
++        vlc_stream_Tell( p_demux->s );
++    p_sys->b_repeats = false;
++    p_sys->i_end_time = p_sys->i_length = VLC_TICK_INVALID;
+     p_sys->p_es = NULL;
+ 
++    /* The time the blocks read so far play for: the next one's time. */
+     date_Init( &p_sys->pts, 1, 1 );
+-    date_Set( &p_sys->pts, 1 );
++    date_Set( &p_sys->pts, 0 );
+ 
+     es_format_Init( &p_sys->fmt, AUDIO_ES, 0 );
+ 
+@@ -275,6 +288,7 @@ static int ReadBlockHeader( demux_t *p_demux )
+             i_block_size = 0;
+             p_sys->i_loop_count = GetWLE( buf );
+             p_sys->i_loop_offset = vlc_stream_Tell( p_demux->s );
++            p_sys->b_repeats = true;
+             break;
+ 
+         case 7: /* repeat end block */
+@@ -488,7 +502,10 @@ static int Demux( demux_t *p_demux )
+         if( i_offset >= p_sys->i_block_end )
+         {
+             if( ReadBlockHeader( p_demux ) != VLC_SUCCESS )
++            {
++                p_sys->i_end_time = date_Get( &p_sys->pts );
+                 return 0;
++            }
+             return 1;
+         }
+ 
+@@ -541,16 +558,165 @@ static void Close ( vlc_object_t * p_this )
+     free( p_sys );
+ }
+ 
++/*****************************************************************************
++ * Seek: moves to a time, block by block
++ *****************************************************************************
++ * A block states only its own size and format, so the time of a block comes
++ * from those before it: a time behind the one read is found again from the
++ * first block, one ahead of it by reading on from block to block, each block's
++ * data skipped unread.
++ *****************************************************************************/
++static int Seek( demux_t *p_demux, vlc_tick_t i_time )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++
++    if( p_sys->b_repeats || i_time < 0 )
++        return VLC_EGENERIC;
++
++    if( i_time < date_Get( &p_sys->pts ) )
++    {
++        if( vlc_stream_Seek( p_demux->s, p_sys->i_data_start ) )
++            return VLC_EGENERIC;
++        p_sys->i_block_start = p_sys->i_block_end = p_sys->i_data_start;
++        p_sys->i_silence_countdown = 0;
++        date_Set( &p_sys->pts, 0 );
++    }
++
++    for( ;; )
++    {
++        uint64_t i_frames = 0;
++
++        if( p_sys->i_silence_countdown )
++            i_frames = p_sys->i_silence_countdown;
++        else if( p_sys->p_es != NULL )
++        {
++            int64_t i_offset = vlc_stream_Tell( p_demux->s );
++            if( i_offset < p_sys->i_block_end )
++                i_frames = ( p_sys->i_block_end - i_offset )
++                         / p_sys->fmt.audio.i_bytes_per_frame;
++        }
++
++        date_t end = p_sys->pts;
++        date_Increment( &end, i_frames * p_sys->fmt.audio.i_frame_length );
++        if( i_time < date_Get( &end ) )
++        {
++            /* the time is in this block: skip the frames before it */
++            uint64_t i_skip = ( i_time - date_Get( &p_sys->pts ) )
++                            * p_sys->fmt.audio.i_rate
++                            / ( CLOCK_FREQ * p_sys->fmt.audio.i_frame_length );
++            if( p_sys->i_silence_countdown )
++                p_sys->i_silence_countdown -= i_skip;
++            else if( vlc_stream_Seek( p_demux->s, vlc_stream_Tell( p_demux->s )
++                       + i_skip * p_sys->fmt.audio.i_bytes_per_frame ) )
++                return VLC_EGENERIC;
++            date_Increment( &p_sys->pts,
++                            i_skip * p_sys->fmt.audio.i_frame_length );
++            return VLC_SUCCESS;
++        }
++
++        /* the time is past this block: skip the rest of it */
++        if( p_sys->i_silence_countdown )
++            p_sys->i_silence_countdown = 0;
++        else if( i_frames
++              && vlc_stream_Seek( p_demux->s, p_sys->i_block_end ) )
++            return VLC_EGENERIC;
++        p_sys->pts = end;
++
++        if( ReadBlockHeader( p_demux ) != VLC_SUCCESS )
++        {
++            /* the time is past the last block: the demuxer ends */
++            p_sys->i_end_time = date_Get( &p_sys->pts );
++            return VLC_SUCCESS;
++        }
++        if( p_sys->b_repeats )
++            return VLC_EGENERIC;
++    }
++}
++
++/*****************************************************************************
++ * GetLength: the time of the last block's end, or an estimate until then
++ *****************************************************************************
++ * Until the demuxer reaches the end, the rest of the file is taken to be
++ * blocks like the one being read, each with a header before its data; a
++ * block without data, such as silence, keeps the estimate of the one before.
++ *****************************************************************************/
++static int GetLength( demux_t *p_demux, vlc_tick_t *pi_length )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++
++    if( p_sys->i_end_time != VLC_TICK_INVALID )
++    {
++        *pi_length = p_sys->i_end_time;
++        return VLC_SUCCESS;
++    }
++    if( p_sys->b_repeats )
++        return VLC_EGENERIC;
++
++    uint64_t i_size;
++    int64_t i_offset = vlc_stream_Tell( p_demux->s );
++    int64_t i_block = p_sys->i_block_end - p_sys->i_block_start;
++    if( p_sys->p_es != NULL && !p_sys->i_silence_countdown && i_block > 0
++     && i_offset <= p_sys->i_block_end
++     && !vlc_stream_GetSize( p_demux->s, &i_size )
++     && i_size >= (uint64_t)p_sys->i_block_end )
++    {
++        int64_t i_rest = ( (int64_t)i_size - p_sys->i_block_end ) * i_block
++                       / ( i_block + 4 ) + p_sys->i_block_end - i_offset;
++        p_sys->i_length = date_Get( &p_sys->pts )
++                        + i_rest / p_sys->fmt.audio.i_bytes_per_frame
++                          * p_sys->fmt.audio.i_frame_length * CLOCK_FREQ
++                          / p_sys->fmt.audio.i_rate;
++    }
++    if( p_sys->i_length == VLC_TICK_INVALID )
++        return VLC_EGENERIC;
++    *pi_length = p_sys->i_length;
++    return VLC_SUCCESS;
++}
++
+ /*****************************************************************************
+  * Control:
+  *****************************************************************************/
+ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
+     demux_sys_t *p_sys  = p_demux->p_sys;
++    vlc_tick_t i_length;
++
++    switch( i_query )
++    {
++        case DEMUX_CAN_SEEK:
++        {
++            bool *pb = va_arg( args, bool * );
++            if( p_sys->b_repeats
++             || vlc_stream_Control( p_demux->s, STREAM_CAN_SEEK, pb ) )
++                *pb = false;
++            return VLC_SUCCESS;
++        }
++
++        case DEMUX_GET_TIME:
++            *va_arg( args, vlc_tick_t * ) = date_Get( &p_sys->pts );
++            return VLC_SUCCESS;
++
++        case DEMUX_SET_TIME:
++            return Seek( p_demux, va_arg( args, vlc_tick_t ) );
++
++        case DEMUX_GET_LENGTH:
++            return GetLength( p_demux, va_arg( args, vlc_tick_t * ) );
++
++        case DEMUX_GET_POSITION:
++        {
++            vlc_tick_t i_time = date_Get( &p_sys->pts );
++            if( GetLength( p_demux, &i_length ) || i_length <= 0 )
++                return VLC_EGENERIC;
++            *va_arg( args, double * ) = (double)i_time / i_length;
++            return VLC_SUCCESS;
++        }
++
++        case DEMUX_SET_POSITION:
++            if( GetLength( p_demux, &i_length ) || i_length <= 0 )
++                return VLC_EGENERIC;
++            return Seek( p_demux, va_arg( args, double ) * i_length );
++    }
+ 
+-    return demux_vaControlHelper( p_demux->s, p_sys->i_block_start,
+-                                   p_sys->i_block_end,
+-                                   p_sys->fmt.i_bitrate,
+-                                   p_sys->fmt.audio.i_blockalign,
+-                                   i_query, args );
++    return demux_vaControlHelper( p_demux->s, p_sys->i_data_start, -1, 0, 1,
++                                  i_query, args );
+ }
+-- 
+2.55.0
+

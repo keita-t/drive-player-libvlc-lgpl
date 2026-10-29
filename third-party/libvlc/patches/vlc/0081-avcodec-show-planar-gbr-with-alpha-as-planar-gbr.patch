@@ -1,0 +1,54 @@
+From 9ef3f51f35de4ec95b735634d08b11c03b9fad59 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 07:39:42 +0900
+Subject: [PATCH] avcodec: show planar GBR with alpha as planar GBR
+
+A decoder of RGB with alpha (Lagarith, Ut Video, HuffYUV) decodes to
+planar GBR with an alpha plane, which no chroma here names. Each picture
+it made was dropped for want of an output to show it on, and the video
+showed nothing while it played.
+
+Name that format planar GBR, leaving its alpha plane out, as the
+displays show no alpha. Planar GBR stays converted to planar GBR without
+alpha. A picture of the output has no plane for the alpha a decoder
+writes, so such a format is decoded into the decoder's own buffers and
+copied rather than rendered directly.
+---
+ modules/codec/avcodec/chroma.c | 4 ++++
+ modules/codec/avcodec/video.c  | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/modules/codec/avcodec/chroma.c b/modules/codec/avcodec/chroma.c
+index ceb1373..6fe7b40 100644
+--- a/modules/codec/avcodec/chroma.c
++++ b/modules/codec/avcodec/chroma.c
+@@ -180,6 +180,10 @@ static const struct
+     {VLC_CODEC_RGBP, AV_PIX_FMT_PAL8, 0, 0, 0},
+ 
+     {VLC_CODEC_GBR_PLANAR, AV_PIX_FMT_GBRP, 0, 0, 0 },
++    /* No planar GBR with alpha is shown: the alpha plane is left out, as the
++     * displays here show none (Lagarith, Ut Video, HuffYUV with alpha). After
++     * GBRP, which planar GBR stays converted to. */
++    {VLC_CODEC_GBR_PLANAR, AV_PIX_FMT_GBRAP, 0, 0, 0 },
+     {VLC_CODEC_GBR_PLANAR_9L, AV_PIX_FMT_GBRP9LE, 0, 0, 0 },
+     {VLC_CODEC_GBR_PLANAR_9B, AV_PIX_FMT_GBRP9BE, 0, 0, 0 },
+     {VLC_CODEC_GBR_PLANAR_10L, AV_PIX_FMT_GBRP10LE, 0, 0, 0 },
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 8c61bd9..f6925b9 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -1638,6 +1638,11 @@ static int lavc_dr_GetFrame(struct AVCodecContext *ctx, AVFrame *frame,
+     if (ctx->pix_fmt == AV_PIX_FMT_PAL8)
+         goto error;
+ 
++    /* A format shown without some of its planes (the alpha of planar GBR)
++     * is decoded into the decoder's own buffers and copied. */
++    if (av_pix_fmt_count_planes(ctx->pix_fmt) > pic->i_planes)
++        goto error;
++
+     int width = frame->width;
+     int height = frame->height;
+     int aligns[AV_NUM_DATA_POINTERS];
+-- 
+2.55.0
+

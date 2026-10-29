@@ -1,0 +1,37 @@
+From 26f3a9b02cbc36f344aa3ee128663248a6aeffcf Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 23 Oct 2026 07:43:33 +0900
+Subject: [PATCH] soxr: resample into 16-bit samples without dither
+
+Given 16-bit output, soxr adds TPDF dither unless told not to, and the
+resampler asks for none of its own: a source not at the output's rate
+came out with a noise of the least bit through its silences. A digital
+silence, as between tracks or in a silent stretch, was no longer
+silent, unlike the same silence from a source at the output's rate,
+which is not resampled, or through the other resamplers, which do not
+dither.
+
+Resample without dither.
+---
+ modules/audio_filter/resampler/soxr.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/modules/audio_filter/resampler/soxr.c b/modules/audio_filter/resampler/soxr.c
+index 407c3db..a1b342d 100644
+--- a/modules/audio_filter/resampler/soxr.c
++++ b/modules/audio_filter/resampler/soxr.c
+@@ -150,6 +150,11 @@ Open( vlc_object_t *p_obj, bool b_change_ratio )
+     soxr_error_t error;
+     /* IO spec */
+     soxr_io_spec_t io_spec = soxr_io_spec( i_itype, i_otype );
++    /* Into 16-bit samples, soxr dithers by default: a noise of the least
++     * bit, which turns the digital silence of a source resampled into a
++     * hiss that the output of a source at its rate, which is not resampled,
++     * and the other resamplers do not have. Keep a silence silent. */
++    io_spec.flags |= SOXR_NO_DITHER;
+     /* Quality spec */
+     soxr_quality_spec_t q_spec = soxr_quality_spec( i_recipe, 0 );
+     /* Create SoXR */
+-- 
+2.55.0
+

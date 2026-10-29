@@ -1,0 +1,134 @@
+From c83d667992bc24145f992dc4338eabb2a4979cde Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 20:26:14 +0900
+Subject: [PATCH] mediacodec: begin MPEG-2 after a flush at a sequence header
+ or intra picture too
+
+A deferred MPEG-2 start waited for a block MediaCodec can decode from,
+but a stream whose output opened at once, and every stream after a
+flush, went on with whatever block came next. Where a demuxer knows no
+key pictures, as FFmpeg's GXF one, which marks only the first, a seek
+lands in the middle of a group of pictures: MediaCodec was given
+pictures that refer to ones it never had, showed them broken or not
+at all, and a paused seek waited for a picture that did not come. Each
+start and each flush now waits for a block with a sequence header or
+an intra picture, read from the picture header where the block is not
+marked as one, dropping the blocks before it; a stream refreshed
+without intra pictures is begun anyway after 128 blocks.
+---
+ modules/codec/omxil/mediacodec.c | 55 +++++++++++++++++++++++++-------
+ 1 file changed, 44 insertions(+), 11 deletions(-)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index ad4e7cb..bba3087 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -132,6 +132,10 @@ struct decoder_sys_t
+             unsigned int i_inflight_pictures;
+             timestamp_fifo_t *timestamp_fifo;
+             int i_mpeg_dar_num, i_mpeg_dar_den;
++            /* An MPEG-1/2 stream waits for a block to begin from; see
++             * DecodeBlock. */
++            bool b_mpeg_sync_awaited;
++            unsigned i_mpeg_sync_dropped;
+             /* The sample aspect of the MPEG-4 Part 2 video object layer. */
+             unsigned i_mp4v_sar_num, i_mp4v_sar_den;
+         } video;
+@@ -456,6 +460,10 @@ static int ParseExtra(decoder_t *p_dec)
+         return VLC_SUCCESS;
+ }
+ 
++/* The most blocks an MPEG-1/2 stream drops while it waits for one to begin
++ * from: a few seconds of pictures. */
++#define MPEG2_SYNC_MAX_DROPPED 128
++
+ /* DAR aspect ratio from the DVD MPEG2 standard */
+ static const int mpeg2_aspect[16][2] =
+ {
+@@ -467,6 +475,16 @@ static const int mpeg2_aspect[16][2] =
+     {0,0}, {0,0}
+ };
+ 
++/* Whether [p, p + i_size) holds the header of an MPEG-1/2 intra picture. */
++static bool MPEG2_HasIntraPicture(const uint8_t *p, size_t i_size)
++{
++    for (size_t i = 0; i + 5 < i_size; i++)
++        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && p[i + 3] == 0x00
++         && ((p[i + 5] >> 3) & 0x7) == 1 /* picture_coding_type: I */)
++            return true;
++    return false;
++}
++
+ /* Whether [p, p + i_size) holds an MPEG-1/2 sequence header, and the display
+  * aspect it states in *pi_num:*pi_den, 0:0 for square samples. */
+ static bool MPEG2_GetDar(const uint8_t *p, size_t i_size, int *pi_num, int *pi_den)
+@@ -832,6 +850,9 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+         p_sys->pf_on_new_block = Video_OnNewBlock;
+         p_sys->pf_on_flush = Video_OnFlush;
+         p_sys->pf_process_output = Video_ProcessOutput;
++        p_sys->video.b_mpeg_sync_awaited =
++            p_dec->fmt_in.i_codec == VLC_CODEC_MPGV ||
++            p_dec->fmt_in.i_codec == VLC_CODEC_MP2V;
+ 
+         p_sys->video.timestamp_fifo = timestamp_FifoNew(32);
+         if (!p_sys->video.timestamp_fifo)
+@@ -1868,15 +1889,15 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
+-    /* A deferred MPEG-2 start waits for a block MediaCodec can begin decoding
+-     * with: one with a sequence header, which states the aspect, or an intra
+-     * picture. A decoder that starts in the middle of a group of pictures, as
+-     * after a seek a demuxer lands there, gets pictures that refer to ones it
+-     * never had, and would open its output without the aspect; they are
+-     * dropped until then. */
+-    if (p_sys->b_start_on_first_block
+-     && (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
+-      || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V))
++    /* An MPEG-1/2 stream is begun, and taken up again after a flush, at a
++     * block MediaCodec can decode from: one with a sequence header, which also
++     * states the aspect a deferred output opens with, or an intra picture.
++     * One that begins in the middle of a group of pictures, where a demuxer
++     * that knows no key pictures (FFmpeg's GXF one) lands a seek, gets pictures
++     * that refer to ones it never had, and MediaCodec shows them broken or not
++     * at all; they are dropped until then. A stream refreshed without intra
++     * pictures is begun anyway after a few seconds of them. */
++    if (p_sys->video.b_mpeg_sync_awaited)
+     {
+         int i_dar_num, i_dar_den;
+         if (MPEG2_GetDar(p_in_block->p_buffer, p_in_block->i_buffer,
+@@ -1884,10 +1905,15 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         {
+             p_sys->video.i_mpeg_dar_num = i_dar_num;
+             p_sys->video.i_mpeg_dar_den = i_dar_den;
++            p_sys->video.b_mpeg_sync_awaited = false;
+         }
+-        else if (!(p_in_block->i_flags & BLOCK_FLAG_TYPE_I))
++        else if ((p_in_block->i_flags & BLOCK_FLAG_TYPE_I)
++              || MPEG2_HasIntraPicture(p_in_block->p_buffer, p_in_block->i_buffer)
++              || ++p_sys->video.i_mpeg_sync_dropped > MPEG2_SYNC_MAX_DROPPED)
++            p_sys->video.b_mpeg_sync_awaited = false;
++        else
+         {
+-            msg_Dbg(p_dec, "waiting for a sequence header to start");
++            msg_Dbg(p_dec, "waiting for a sequence header or an intra picture");
+             goto end;
+         }
+     }
+@@ -2102,6 +2128,13 @@ static void Video_OnFlush(decoder_t *p_dec)
+     decoder_sys_t *p_sys = p_dec->p_sys;
+ 
+     timestamp_FifoEmpty(p_sys->video.timestamp_fifo);
++    /* What follows a flush may begin anywhere in a group of pictures. */
++    if (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
++     || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V)
++    {
++        p_sys->video.b_mpeg_sync_awaited = true;
++        p_sys->video.i_mpeg_sync_dropped = 0;
++    }
+     /* Invalidate all pictures that are currently in flight
+      * since flushing make all previous indices returned by
+      * MediaCodec invalid. */
+-- 
+2.55.0
+

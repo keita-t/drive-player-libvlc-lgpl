@@ -1,0 +1,44 @@
+From b1a57cfe82895c2444e55e65b558ee055425248a Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 14:16:28 +0900
+Subject: [PATCH] ts: count the PCRs the probe reads as received
+
+The demuxer takes a program for one with no PCR, and moves its clock to
+another pid, when a block comes more than half a second after the first
+timestamp seen with no PCR received on the PCR pid. The probe of the start
+records that first timestamp, but the PCRs it reads were not counted: a
+start time or a seek after it brings the first blocks from far on, and
+where LPCM sound takes most of the packets, as in a Blu-ray stream whose
+video takes few bytes, a block of sound came before the next PCR. The
+program then lost its clock: every later seek by time failed and landed
+by the byte position, a second late.
+
+Count the PCRs the probe reads on a pid, as PCRHandle counts those it
+reads while demuxing.
+---
+ modules/demux/mpeg/ts.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/modules/demux/mpeg/ts.c b/modules/demux/mpeg/ts.c
+index e8ded01..a530542 100644
+--- a/modules/demux/mpeg/ts.c
++++ b/modules/demux/mpeg/ts.c
+@@ -2086,6 +2086,15 @@ static int ProbeChunk( demux_t *p_demux, int i_program, bool b_end, ts_90khz_t *
+ 
+             if( b_adaptfield && p_pkt->i_buffer >= 4 + 2 + 5 )
+                 *pi_pcr = GetPCR( p_pkt );
++            /* A PCR the probe reads counts as one received on its pid, as
++             * PCRHandle counts them while demuxing: a start time or a seek
++             * after probing the start can bring the first blocks of another
++             * stream more than half a second past the first timestamp
++             * probed, with no PCR read since, as where LPCM sound takes most
++             * of the packets, and PCRFixHandle would take a stream that has
++             * PCRs for one with none. */
++            if( *pi_pcr != TS_90KHZ_INVALID )
++                p_pid->probed.i_pcr_count++;
+ 
+             /* Presentation endpoints, independent of the clock endpoints:
+              * even a packet carrying a PCR also has a presentation timestamp.
+-- 
+2.55.0
+

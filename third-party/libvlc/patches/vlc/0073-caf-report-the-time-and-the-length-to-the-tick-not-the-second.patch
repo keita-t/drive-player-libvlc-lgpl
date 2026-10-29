@@ -1,0 +1,39 @@
+From d1830e2171a4f362f5f404bbea9b686de3cf4ad2 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 21:47:27 +0900
+Subject: [PATCH] caf: report the time and the length to the tick, not the
+ second
+
+The demuxer divided its sample counts by the rate before scaling them to
+ticks, so its time and its length came in whole seconds: a file was
+reported shorter than it is, and its time stood still for a second at a
+time, the input reporting it less what it had read ahead. A seek to 4 s
+then read as one to 3.44 s.
+
+Scale the counts before dividing them.
+---
+ modules/demux/caf.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/modules/demux/caf.c b/modules/demux/caf.c
+index d712cbf..ceef301 100644
+--- a/modules/demux/caf.c
++++ b/modules/demux/caf.c
+@@ -1047,12 +1047,12 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+         case DEMUX_GET_LENGTH:
+             pi64 = va_arg( args, int64_t * );
+-            *pi64 = CLOCK_FREQ * ( i_num_samples / p_sys->fmt.audio.i_rate );
++            *pi64 = CLOCK_FREQ * i_num_samples / p_sys->fmt.audio.i_rate;
+             return VLC_SUCCESS;
+ 
+         case DEMUX_GET_TIME:
+             pi64 = va_arg( args, int64_t * );
+-            *pi64 = CLOCK_FREQ * ( p_sys->position.i_samples / p_sys->fmt.audio.i_rate );
++            *pi64 = CLOCK_FREQ * p_sys->position.i_samples / p_sys->fmt.audio.i_rate;
+             return VLC_SUCCESS;
+ 
+         case DEMUX_GET_POSITION:
+-- 
+2.55.0
+

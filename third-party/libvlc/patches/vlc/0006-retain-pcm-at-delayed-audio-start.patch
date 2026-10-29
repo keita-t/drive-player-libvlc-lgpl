@@ -1,4 +1,4 @@
-From 0c8807f8d1e01392a7c0ddfcdb48c5f4515d7588 Mon Sep 17 00:00:00 2001
+From 96fe686a57adb01a6ed2df62659c526a7dc0b6e3 Mon Sep 17 00:00:00 2001
 From: Drive Player <drive-player@localhost>
 Date: Mon, 5 Oct 2026 14:51:22 +0900
 Subject: [PATCH] audio: retain PCM when the output misses its first deadline
@@ -15,14 +15,27 @@ and leave paused time to the existing resume adjustment. Serialize the
 clock adjustment with decoder flushing to avoid rebasing a seek from an
 in-flight old buffer.
 
+Where the output says its delay, the first buffer is late when it would
+be heard after its date, played now and heard after that delay: move it
+to when it is heard, however little it is late. Late by the output's
+delay alone, it was otherwise flushed, or resampled for long towards the
+clock. Where the output does not say its delay, paused or holding audio
+it took while paused, keep the 60 ms threshold.
+
+Start the output again after a flush as at its start: the flush marks a
+discontinuity, so that an early first buffer has its lead played as
+silence rather than be resampled towards the clock as a drift of
+continuous playback is, and it stops the resampling of what played
+before.
+
 Keep ordinary late-buffer dropping and clockless output behavior.
 ---
- src/audio_output/aout_internal.h |  6 +++++-
- src/audio_output/dec.c           | 18 ++++++++++++++++--
- src/input/clock.c                | 22 ++++++++++++++++++++++
- src/input/clock.h                | 12 +++++++++++-
- src/input/decoder.c              | 14 +++++++++++++-
- 5 files changed, 67 insertions(+), 5 deletions(-)
+ src/audio_output/aout_internal.h |  6 +++-
+ src/audio_output/dec.c           | 47 ++++++++++++++++++++++++++++++--
+ src/input/clock.c                | 22 +++++++++++++++
+ src/input/clock.h                | 12 +++++++-
+ src/input/decoder.c              | 14 +++++++++-
+ 5 files changed, 96 insertions(+), 5 deletions(-)
 
 diff --git a/src/audio_output/aout_internal.h b/src/audio_output/aout_internal.h
 index ee40a33..d710515 100644
@@ -42,7 +55,7 @@ index ee40a33..d710515 100644
  void aout_DecChangePause(audio_output_t *, bool b_paused, vlc_tick_t i_date);
  void aout_DecFlush(audio_output_t *, bool wait);
 diff --git a/src/audio_output/dec.c b/src/audio_output/dec.c
-index 7eca0de..8b1dd5a 100644
+index 7eca0de..3f8edd7 100644
 --- a/src/audio_output/dec.c
 +++ b/src/audio_output/dec.c
 @@ -354,9 +354,12 @@ static void aout_DecSynchronize (audio_output_t *aout, vlc_tick_t dec_pts,
@@ -56,29 +69,72 @@ index 7eca0de..8b1dd5a 100644
      aout_owner_t *owner = aout_owner (aout);
 +    if (start_date != NULL)
 +        *start_date = VLC_TICK_INVALID;
-
+ 
      assert (input_rate >= INPUT_RATE_DEFAULT / AOUT_MAX_INPUT_RATE);
      assert (input_rate <= INPUT_RATE_DEFAULT * AOUT_MAX_INPUT_RATE);
-@@ -370,7 +373,18 @@ int aout_DecPlay (audio_output_t *aout, block_t *block, int input_rate)
+@@ -370,7 +373,37 @@ int aout_DecPlay (audio_output_t *aout, block_t *block, int input_rate)
      if (unlikely(ret == AOUT_DEC_FAILED))
          goto drop; /* Pipeline is unrecoverably broken :-( */
-
+ 
 -    const vlc_tick_t now = mdate (), advance = block->i_pts - now;
 +    const vlc_tick_t now = mdate ();
 +    vlc_tick_t advance = block->i_pts - now;
-+    if (advance < -AOUT_MAX_PTS_DELAY && start_date != NULL
-+     && owner->sync.end == VLC_TICK_INVALID)
++    bool placed = false;
++    if (start_date != NULL && owner->sync.end == VLC_TICK_INVALID)
 +    {
-+        /* Output initialization may have consumed the first buffer's lead.
-+         * Keep the PCM and let the decoder move the shared input clock, so
-+         * subsequent audio and video retain their relative timestamps. */
-+        *start_date = now;
-+        block->i_pts = now;
-+        advance = 0;
++        /* The first buffer after the output started, restarted or was
++         * flushed: output initialization or a seek may have consumed its
++         * lead. Keep the PCM and let the decoder move the shared input clock,
++         * so subsequent audio and video retain their relative timestamps.
++         * Where the output says its delay, the buffer is late when it would
++         * be heard after its date, and it is moved to when it is heard: late
++         * by the delay alone, it would be flushed or resampled for long
++         * towards the clock instead. */
++        vlc_tick_t delay;
++        if (aout_OutputTimeGet (aout, &delay) == 0)
++        {
++            if (now + delay > block->i_pts)
++            {
++                *start_date = now + delay;
++                block->i_pts = now + delay;
++                advance = delay;
++                placed = true;
++            }
++        }
++        else if (advance < -AOUT_MAX_PTS_DELAY)
++        {
++            *start_date = now;
++            block->i_pts = now;
++            advance = 0;
++        }
 +    }
      if (advance < -AOUT_MAX_PTS_DELAY)
      {   /* Late buffer can be caused by bugs in the decoder, by scheduling
           * latency spikes (excessive load, SIGSTOP, etc.) or if buffering is
+@@ -386,6 +419,10 @@ int aout_DecPlay (audio_output_t *aout, block_t *block, int input_rate)
+     }
+     if (block->i_flags & BLOCK_FLAG_DISCONTINUITY)
+         owner->sync.discontinuity = true;
++    /* Placed when it is heard: what the drift correction finds left is the
++     * time taken since, not a lateness to flush */
++    if (placed)
++        owner->sync.discontinuity = false;
+ 
+     if (atomic_exchange(&owner->vp.update, false))
+     {
+@@ -452,6 +489,12 @@ void aout_DecFlush (audio_output_t *aout, bool wait)
+ 
+     aout_OutputLock (aout);
+     owner->sync.end = VLC_TICK_INVALID;
++    /* What plays after a flush starts again, as the output did when it began:
++     * placed on the clock at once, its lead played as silence, rather than
++     * resampled towards the clock as a drift of continuous playback is, with
++     * the resampling of what played before */
++    owner->sync.discontinuity = true;
++    aout_StopResampling (aout);
+     if (owner->mixer_format.i_format)
+     {
+         if (wait)
 diff --git a/src/input/clock.c b/src/input/clock.c
 index 3099cfe..a303880 100644
 --- a/src/input/clock.c
@@ -86,7 +142,7 @@ index 3099cfe..a303880 100644
 @@ -523,6 +523,28 @@ void input_clock_ChangeSystemOrigin( input_clock_t *cl, bool b_absolute, vlc_tic
      vlc_mutex_unlock( &cl->lock );
  }
-
+ 
 +void input_clock_DelayStart( input_clock_t *cl, vlc_tick_t i_stream,
 +                             vlc_tick_t i_system )
 +{
@@ -129,7 +185,7 @@ index 67a9cf2..571394d 100644
 @@ -94,6 +95,15 @@ void    input_clock_GetSystemOrigin( input_clock_t *, vlc_tick_t *pi_system, vlc
   */
  void    input_clock_ChangeSystemOrigin( input_clock_t *, bool b_absolute, vlc_tick_t i_system );
-
+ 
 +/**
 + * Delay the shared clock so that the given stream timestamp reaches its audio
 + * output start date. Recompute the timestamp under the clock lock to account
@@ -148,7 +204,7 @@ index 69488a6..8c20c64 100644
 +++ b/src/input/decoder.c
 @@ -1181,6 +1181,7 @@ static int DecoderPlayAudio( decoder_t *p_dec, block_t *p_audio,
      int i_rate = INPUT_RATE_DEFAULT;
-
+ 
      DecoderWaitUnblock( p_dec );
 +    const vlc_tick_t i_stream_pts = p_audio->i_pts + p_owner->i_ts_delay;
      DecoderFixTs( p_dec, &p_audio->i_pts, NULL, &p_audio->i_length,
@@ -174,3 +230,6 @@ index 69488a6..8c20c64 100644
          if( status == AOUT_DEC_CHANGED )
          {
              /* Only reload the decoder */
+-- 
+2.55.0
+

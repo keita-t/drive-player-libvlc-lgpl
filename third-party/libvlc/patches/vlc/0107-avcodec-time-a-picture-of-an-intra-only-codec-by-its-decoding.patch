@@ -1,0 +1,67 @@
+From 224dbf4a6f629f001598a822685a4b4a85308c17 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 28 Oct 2026 20:02:28 +0900
+Subject: [PATCH] avcodec: time a picture of an intra-only codec by its
+ decoding when it has no other
+
+An MP4 track without composition offsets times its video samples by
+their decoding alone and leaves the presentation time to a packetizer.
+A codec without a packetizer goes to libavcodec untimed by presentation.
+A decoder libavcodec feeds packet by packet (MJPEG, ProRes) takes the
+packet's decoding time, but one that takes its packets itself
+(FF_CODEC_RECEIVE_FRAME_CB: APV) gets only the presentation time. Its
+frames had no time, and their pictures were dropped: an APV track in MP4
+decoded every picture and showed none of them.
+
+An intra-only codec shows its pictures in the order it decodes them, so
+its decoding time is its presentation time: hand that to libavcodec as
+the presentation time of a block that has none. Other codecs, and blocks
+that have a presentation time, are handed over as before.
+---
+ modules/codec/avcodec/video.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 0d97854..b8a3dca 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -72,6 +72,10 @@ struct decoder_sys_t
+     bool b_hardware_only;
+     enum AVDiscard i_skip_frame;
+ 
++    /* Whether the codec codes every picture on its own, so that it shows them
++     * in the order it decodes them */
++    bool b_intra_only;
++
+     /* how many decoded frames are late */
+     int     i_late_frames;
+     vlc_tick_t i_late_frames_start;
+@@ -602,6 +606,8 @@ static int InitVideoDecCommon( decoder_t *p_dec )
+     p_sys->i_late_frames = 0;
+     p_sys->b_from_preroll = false;
+     p_sys->b_draining = false;
++    const AVCodecDescriptor *p_descriptor = avcodec_descriptor_get( p_context->codec_id );
++    p_sys->b_intra_only = p_descriptor && ( p_descriptor->props & AV_CODEC_PROP_INTRA_ONLY );
+ 
+     /* Set output properties */
+     if( GetVlcChroma( &p_dec->fmt_out.video, p_context->pix_fmt ) != VLC_SUCCESS )
+@@ -1234,6 +1240,16 @@ static picture_t *DecodeBlock( decoder_t *p_dec, block_t **pp_block, bool *error
+                 pkt->size = p_block->i_buffer;
+                 pkt->pts = p_block->i_pts > VLC_TICK_INVALID ? p_block->i_pts : AV_NOPTS_VALUE;
+                 pkt->dts = p_block->i_dts > VLC_TICK_INVALID ? p_block->i_dts : AV_NOPTS_VALUE;
++                /* An intra-only codec shows its pictures in the order it
++                 * decodes them, so a block a demuxer timed by its decoding
++                 * alone (MP4 without composition offsets, which leaves
++                 * reordering to a packetizer) is shown at that time. A
++                 * decoder that takes its packets itself (APV) gives its frame
++                 * the packet's presentation time but not its decoding time,
++                 * as one libavcodec feeds packet by packet does, and a
++                 * picture without a time is dropped. */
++                if( pkt->pts == AV_NOPTS_VALUE && p_sys->b_intra_only )
++                    pkt->pts = pkt->dts;
+                 /* State a key picture as FFmpeg's demuxers do: some decoders
+                  * keep its data for the pictures that refer to it (Flash
+                  * Screen Video 2), or take a packet without the flag as a
+-- 
+2.55.0
+

@@ -1,0 +1,95 @@
+From 44ff4439e207d7f8160b59a25937c1c3757b4ebf Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 20:21:17 +0900
+Subject: [PATCH] avi: keep the length to the tick, not the second
+
+The demuxer kept a file's length in whole seconds, the index's length cut
+down to the second: a file was reported shorter than it is by up to a
+second, its positions were shares of that shorter length, and a file
+shorter than a second had none. Without a length, a demuxer finding no
+selected track to read ends the input, and a player waiting for one
+cannot show where it is.
+
+Keep the length the index gives, to the tick.
+---
+ modules/demux/avi/avi.c | 20 +++++++++-----------
+ 1 file changed, 9 insertions(+), 11 deletions(-)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index 820a8f9..1d14869 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -908,8 +908,8 @@ aviindex:
+     }
+     if( i_idx_totalframes != p_avih->i_totalframes &&
+         p_sys->i_length < (vlc_tick_t)p_avih->i_totalframes *
+-                          (vlc_tick_t)p_avih->i_microsecperframe /
+-                          CLOCK_FREQ )
++                          (vlc_tick_t)p_avih->i_microsecperframe *
++                          CLOCK_FREQ / 1000000 )
+     {
+         msg_Warn( p_demux, "broken or missing index, 'seek' will be "
+                            "approximative or will exhibit strange behavior" );
+@@ -1234,7 +1234,7 @@ static int Demux_Seekable( demux_t *p_demux )
+ 
+     if( i_track_count <= 0 )
+     {
+-        int64_t i_length = p_sys->i_length * CLOCK_FREQ;
++        vlc_tick_t i_length = p_sys->i_length;
+ 
+         p_sys->i_time += p_sys->i_read_increment;
+         if( i_length > 0 )
+@@ -1831,7 +1831,7 @@ static double ControlGetPosition( demux_t *p_demux )
+ 
+     if( p_sys->i_length > 0 )
+     {
+-        return (double)p_sys->i_time / (double)( p_sys->i_length * (vlc_tick_t)CLOCK_FREQ );
++        return (double)p_sys->i_time / (double)p_sys->i_length;
+     }
+     else if( stream_Size( p_demux->s ) > 0 )
+     {
+@@ -1868,7 +1868,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             }
+             else
+             {
+-                i64 = (vlc_tick_t)(f * CLOCK_FREQ * p_sys->i_length);
++                i64 = (vlc_tick_t)(f * p_sys->i_length);
+                 return Seek( p_demux, i64, (int)(f * 100), b );
+             }
+ 
+@@ -1889,7 +1889,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             }
+             else if( p_sys->i_length > 0 )
+             {
+-                i_percent = 100 * i64 / (p_sys->i_length*CLOCK_FREQ);
++                i_percent = 100 * i64 / p_sys->i_length;
+             }
+             else if( p_sys->i_time > 0 )
+             {
+@@ -1900,7 +1900,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+         }
+         case DEMUX_GET_LENGTH:
+             pi64 = va_arg( args, int64_t * );
+-            *pi64 = p_sys->i_length * (vlc_tick_t)CLOCK_FREQ;
++            *pi64 = p_sys->i_length;
+             return VLC_SUCCESS;
+ 
+         case DEMUX_GET_FPS:
+@@ -3286,12 +3286,10 @@ static vlc_tick_t  AVI_MovieGetLength( demux_t *p_demux )
+         {
+             i_length = AVI_GetDPTS( tk, tk->idx.i_size );
+         }
+-        i_length /= CLOCK_FREQ;    /* in seconds */
+-
+         msg_Dbg( p_demux,
+-                 "stream[%d] length:%"PRId64" (based on index)",
++                 "stream[%d] length:%"PRId64" ms (based on index)",
+                  i,
+-                 i_length );
++                 i_length * 1000 / CLOCK_FREQ );
+         i_maxlength = __MAX( i_maxlength, i_length );
+     }
+ 
+-- 
+2.55.0
+

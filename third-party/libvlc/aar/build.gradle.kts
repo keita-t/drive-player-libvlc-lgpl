@@ -3,7 +3,7 @@ plugins {
     `maven-publish`
 }
 
-// Both given by ./local_build.sh --build-libvlc: what build-native.sh left (its out/ directory, with
+// Both given by ./libvlc_build.sh build: what build-native.sh left (its out/ directory, with
 // bindings/ and jni/), and the repository directory to publish into.
 val nativeOutput: File = file(providers.gradleProperty("libvlc.nativeOutput").get())
 val repository: File = file(providers.gradleProperty("libvlc.repository").get())

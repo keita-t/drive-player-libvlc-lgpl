@@ -1,0 +1,62 @@
+From ddd28359c246a76d47f0b681f2dec69e62fb0fae Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 15:34:27 +0900
+Subject: [PATCH] vout: take a picture without a date with a flush of all the
+ pictures
+
+A decoder flushes the video output of all its pictures, those dated from
+the start of the timeline on, when a seek flushes the decoder. A picture
+without a date was left: a picture the decoder forces out while the clock
+has no reference, as when a paused input at its end shows its last picture
+again (the video track restarted on a new window, the end reached at once,
+no clock reference given since). Kept as the picture shown, it was the one
+a paused output showed again after a seek, in place of the seek's picture
+it never took from its queue: the end stayed shown.
+
+A flush of all the pictures takes those without a date too, the one shown
+and those waiting.
+---
+ src/misc/picture_fifo.c         | 5 ++++-
+ src/video_output/video_output.c | 8 +++++++-
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/misc/picture_fifo.c b/src/misc/picture_fifo.c
+index f53cbcd..9b67ad8 100644
+--- a/src/misc/picture_fifo.c
++++ b/src/misc/picture_fifo.c
+@@ -118,8 +118,11 @@ void picture_fifo_Flush(picture_fifo_t *fifo, vlc_tick_t date, bool flush_before
+         picture_t *next = picture->p_next;
+ 
+         picture->p_next = NULL;
++        /* A picture without a date goes with a flush of all of them */
+         if (( flush_before && picture->date <= date) ||
+-            (!flush_before && picture->date >= date))
++            (!flush_before && (picture->date >= date ||
++                               (picture->date <= VLC_TICK_INVALID &&
++                                date <= VLC_TICK_INVALID + 1))))
+             PictureFifoPush(&tmp, picture);
+         else
+             PictureFifoPush(fifo, picture);
+diff --git a/src/video_output/video_output.c b/src/video_output/video_output.c
+index cd06e80..f20800b 100644
+--- a/src/video_output/video_output.c
++++ b/src/video_output/video_output.c
+@@ -1325,8 +1325,14 @@ static void ThreadFlush(vout_thread_t *vout, bool below, vlc_tick_t date)
+ 
+     picture_t *last = vout->p->displayed.decoded;
+     if (last) {
++        /* A picture shown without a date (forced while the clock had no
++         * reference, as the one a paused input shows at its end) has no place
++         * on the timeline: a flush of all of it takes it too. Kept, a paused
++         * output would show it again in place of the next picture. */
+         if (( below && last->date <= date) ||
+-            (!below && last->date >= date)) {
++            (!below && (last->date >= date ||
++                        (last->date <= VLC_TICK_INVALID &&
++                         date <= VLC_TICK_INVALID + 1)))) {
+             picture_Release(last);
+ 
+             vout->p->displayed.decoded   = NULL;
+-- 
+2.55.0
+

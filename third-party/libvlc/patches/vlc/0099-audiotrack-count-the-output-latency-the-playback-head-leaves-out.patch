@@ -1,0 +1,182 @@
+From ce6ecb9854f127bfd39c730c28508dbcb48af982 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 24 Oct 2026 10:59:23 +0900
+Subject: [PATCH] audiotrack: count the output latency the playback head leaves
+ out
+
+The AudioTrack output read its position from the playback head, which
+leaves out the latency of the mixer and the device past it: some 100 to
+130 ms on the devices measured. The audio output took the sound for that
+much early. It also knew no delay until it had written to the AudioTrack,
+so the first audio after a start or a flush played as it came, untimed.
+After a seek the sound was heard 35 to 130 ms late, and what the audio
+output saw as an advance was resampled towards the clock for tens of
+seconds, the wrong way; while it was, the estimate of the head, which
+strays soon after the output starts, could carry the advance past the
+limit, and a silence of 120 ms was inserted in the sound.
+
+Measure the latency past the head with the AudioTrack timestamps, and
+count it in the delay from the next reset on: the position stays the
+head's, so that it does not move by the latency when the timestamps come,
+which made the audio output drop what it held and play silence. What one
+AudioTrack measured holds for the next. Say the delay before anything is
+written while the output plays and holds nothing, so that the audio
+output places the first buffer after a start or a flush by when it is
+heard.
+---
+ modules/audio_output/audiotrack.c | 82 +++++++++++++++++++++++++++----
+ 1 file changed, 73 insertions(+), 9 deletions(-)
+
+diff --git a/modules/audio_output/audiotrack.c b/modules/audio_output/audiotrack.c
+index a6599e8..15bb317 100644
+--- a/modules/audio_output/audiotrack.c
++++ b/modules/audio_output/audiotrack.c
+@@ -123,6 +123,10 @@ struct aout_sys_t {
+         vlc_tick_t i_latency_us;
+     } smoothpos;
+ 
++    /* The output's latency past the playback head, which the position
++     * leaves out, counted in the delay from the last reset on */
++    vlc_tick_t i_latency_us;
++
+     uint32_t i_max_audiotrack_samples;
+     long long i_encoding_flags;
+     bool b_passthrough;
+@@ -174,8 +178,17 @@ struct aout_sys_t {
+ 
+ // Don't use Float for now since 5.1/7.1 Float is down sampled to Stereo Float
+ //#define AUDIOTRACK_USE_FLOAT
++/* The position comes from the playback head alone: AudioTrack timestamps
++ * only measure the latency past it (AudioTrack_MeasureLatency) */
+ //#define AUDIOTRACK_HW_LATENCY
+ 
++/* The output's latency as the AudioTrack timestamps last measured it, for
++ * every output from its next reset: what one AudioTrack measured holds for
++ * the next one, which measures its own only once it has played a while */
++static vlc_mutex_t output_latency_lock = VLC_STATIC_MUTEX;
++static vlc_tick_t output_latency_us = 0;
++#define OUTPUT_LATENCY_MAX_US INT64_C(500000) // 500ms
++
+ /* Get AudioTrack native sample rate: if activated, most of  the resampling
+  * will be done by VLC */
+ #define AUDIOTRACK_NATIVE_SAMPLERATE
+@@ -628,6 +641,12 @@ AudioTrack_ResetPositions( JNIEnv *env, audio_output_t *p_aout )
+     p_sys->smoothpos.i_last_time = 0;
+     p_sys->smoothpos.i_us = 0;
+     p_sys->smoothpos.i_latency_us = 0;
++
++    /* The latency the delay counts changes at a reset only: a change while
++     * playing would move the position under the audio output's feet */
++    vlc_mutex_lock( &output_latency_lock );
++    p_sys->i_latency_us = output_latency_us;
++    vlc_mutex_unlock( &output_latency_lock );
+ }
+ 
+ /**
+@@ -752,6 +771,33 @@ AudioTrack_GetTimestampPositionUs( JNIEnv *env, audio_output_t *p_aout )
+         return 0;
+ }
+ 
++/**
++ * Measure the output's latency past the playback head [i_head_us], from the
++ * AudioTrack timestamp: the frame it says is presented now is behind the
++ * head by the latency of the mixer and the device. The head is what the
++ * position is read from: a position read from the timestamps once they come,
++ * the head before, moved by the latency when they came, and the audio output
++ * took the jump for a drift and played silence.
++ */
++static void
++AudioTrack_MeasureLatency( JNIEnv *env, audio_output_t *p_aout,
++                           vlc_tick_t i_head_us )
++{
++    const vlc_tick_t i_presented_us = AudioTrack_GetTimestampPositionUs( env, p_aout );
++    if( i_head_us <= 0 || i_presented_us <= 0 )
++        return;
++
++    const vlc_tick_t i_latency_us = i_head_us - i_presented_us;
++    if( i_latency_us <= 0 || i_latency_us > OUTPUT_LATENCY_MAX_US )
++        return;
++
++    vlc_mutex_lock( &output_latency_lock );
++    /* A timestamp is precise to a few milliseconds: average them */
++    output_latency_us = output_latency_us == 0 ? i_latency_us
++                      : ( output_latency_us * 7 + i_latency_us ) / 8;
++    vlc_mutex_unlock( &output_latency_lock );
++}
++
+ static int
+ TimeGet( audio_output_t *p_aout, vlc_tick_t *restrict p_delay )
+ {
+@@ -764,13 +810,32 @@ TimeGet( audio_output_t *p_aout, vlc_tick_t *restrict p_delay )
+ 
+     vlc_mutex_lock( &p_sys->lock );
+ 
+-    if( p_sys->b_error || !p_sys->i_samples_written || !( env = GET_ENV() ) )
++    if( p_sys->b_error || !( env = GET_ENV() ) )
+         goto bailout;
+ 
+-    i_audiotrack_us = AudioTrack_GetTimestampPositionUs( env, p_aout );
++    if( !p_sys->i_samples_written )
++    {
++        /* Paused, as an output started paused is until it plays, nothing
++         * plays: the clock the audio output reads its delay against is
++         * stopped, and a delay would place audio by it. Audio it took while
++         * paused waits in the circular buffer, placed when it was taken:
++         * placed again by the delay, it would be found late and flushed. */
++        if( p_sys->b_thread_paused
++         || p_sys->circular.i_write != p_sys->circular.i_read )
++            goto bailout;
+ 
+-    if( i_audiotrack_us <= 0 )
+-        i_audiotrack_us = AudioTrack_GetSmoothPositionUs(env, p_aout );
++        /* Nothing was written to the AudioTrack since it started or was
++         * flushed, nor waits to be: what is played next is heard after the
++         * latency. Saying so lets the first audio be placed on the clock, as
++         * the audio output does after a start or a flush, rather than be
++         * played as it comes and resampled towards the clock after. */
++        *p_delay = p_sys->i_latency_us;
++        vlc_mutex_unlock( &p_sys->lock );
++        return 0;
++    }
++
++    i_audiotrack_us = AudioTrack_GetSmoothPositionUs(env, p_aout );
++    AudioTrack_MeasureLatency( env, p_aout, i_audiotrack_us );
+ 
+ /* Debug log for both delays */
+ #if 0
+@@ -799,9 +864,10 @@ TimeGet( audio_output_t *p_aout, vlc_tick_t *restrict p_delay )
+                         - i_audiotrack_us;
+         if( i_delay >= 0 )
+         {
+-            /* Circular buffer delay */
++            /* Circular buffer delay, and the latency past the head */
+             i_delay += BYTES_TO_US( p_sys->circular.i_write
+-                                    - p_sys->circular.i_read );
++                                    - p_sys->circular.i_read )
++                     + p_sys->i_latency_us;
+             *p_delay = i_delay;
+             vlc_mutex_unlock( &p_sys->lock );
+             return 0;
+@@ -1287,10 +1353,9 @@ Start( audio_output_t *p_aout, audio_sample_format_t *restrict p_fmt )
+ 
+     p_sys->i_max_audiotrack_samples = BYTES_TO_FRAMES( p_sys->audiotrack_args.i_size );
+ 
+-#ifdef AUDIOTRACK_HW_LATENCY
+     if( jfields.AudioTimestamp.clazz )
+     {
+-        /* create AudioTimestamp object */
++        /* create AudioTimestamp object, to measure the latency */
+         jobject p_obj = JNI_CALL( NewObject, jfields.AudioTimestamp.clazz,
+                                  jfields.AudioTimestamp.ctor );
+         if( p_obj )
+@@ -1301,7 +1366,6 @@ Start( audio_output_t *p_aout, audio_sample_format_t *restrict p_fmt )
+         if( !p_sys->timestamp.p_obj )
+             goto error;
+     }
+-#endif
+ 
+     AudioTrack_Reset( env, p_aout );
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,109 @@
+From ef7f9f087431f349109ee3f0a37e86b83a45d617 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 16:35:41 +0900
+Subject: [PATCH] avformat: take the length a file states where FFmpeg reads
+ none
+
+Some files state their length in a way FFmpeg does not read, and FFmpeg
+then gives none: the input had no length, its position could not be
+shown, and a player waiting for one never played it.
+
+- An AMV file, the AVI of portable players, states it to the second in
+  the last fields of its amvh; its stream headers and sizes are left
+  empty, and FFmpeg reads it as an AVI.
+- A FLIC animation states its frame count in its header; FFmpeg times
+  its frames by the header's speed but does not count them.
+- An OMA file of lossless ATRAC states it in milliseconds in the TLEN of
+  its tag; FFmpeg reckons an OMA file's length by a bitrate, which a
+  lossless one has none of.
+
+Take the length the file states when FFmpeg gives none.
+---
+ modules/demux/avformat/demux.c | 57 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 5044271..c0f6852 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -198,6 +198,57 @@ static void get_palette(es_format_t *fmt, const AVStream *s)
+     }
+ }
+ 
++/* The bytes a file starts with, kept from its probe for what FFmpeg leaves
++ * of them unread: the AMV header is 88 bytes */
++#define STATED_HEADER_SIZE 88
++
++/* The length a file states where FFmpeg reads none, or AV_NOPTS_VALUE:
++ * - an AMV file, the AVI of portable players, to the second, in the last four
++ *   bytes of its amvh (the seconds, the minutes and the hours in 16 bits):
++ *   FFmpeg reads it as an AVI, whose stream headers and sizes it leaves empty;
++ * - a FLIC animation, its frame count in its header, the frames timed as
++ *   FFmpeg times them, by the period of the header's speed;
++ * - an ID3v2 TLEN, in milliseconds, as the tag of an OMA file of lossless
++ *   ATRAC states it: FFmpeg reckons an OMA file's length by a bitrate, which
++ *   a lossless one has none of. */
++static int64_t StatedDuration( AVFormatContext *ic, const uint8_t *p_header,
++                               size_t i_header )
++{
++    if( !strcmp( ic->iformat->name, "avi" ) && i_header >= 32 + 56 &&
++        !memcmp( p_header, "RIFF", 4 ) && !memcmp( &p_header[8], "AMV LIST", 8 ) &&
++        !memcmp( &p_header[20], "hdrlamvh", 8 ) && GetDWLE( &p_header[28] ) >= 56 )
++    {
++        /* RIFF <size> AMV LIST <size> hdrl amvh <size> <its fields> */
++        const uint8_t *p_length = &p_header[32 + 52];
++        const int64_t i_seconds = p_length[0] + 60 * p_length[1] +
++                                  3600 * GetWLE( &p_length[2] );
++        if( i_seconds > 0 )
++            return i_seconds * AV_TIME_BASE;
++    }
++
++    if( !strcmp( ic->iformat->name, "flic" ) && i_header >= 8 )
++    {
++        const unsigned i_frames = GetWLE( &p_header[6] );
++        for( unsigned i = 0; i < ic->nb_streams && i_frames > 0; i++ )
++        {
++            const AVStream *st = ic->streams[i];
++            if( st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO )
++                return av_rescale_q( i_frames, st->time_base, AV_TIME_BASE_Q );
++        }
++    }
++
++    const AVDictionaryEntry *p_tlen = av_dict_get( ic->metadata, "TLEN", NULL, 0 );
++    if( p_tlen != NULL )
++    {
++        char *psz_end;
++        const long long i_ms = strtoll( p_tlen->value, &psz_end, 10 );
++        if( psz_end != p_tlen->value && *psz_end == '\0' && i_ms > 0 )
++            return av_rescale( i_ms, AV_TIME_BASE, 1000 );
++    }
++
++    return AV_NOPTS_VALUE;
++}
++
+ int avformat_OpenDemux( vlc_object_t *p_this )
+ {
+     demux_t       *p_demux = (demux_t*)p_this;
+@@ -224,6 +275,9 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+ 
+     memcpy( pd.buf, peek, pd.buf_size );
+     memset( pd.buf + pd.buf_size, 0, AVPROBE_PADDING_SIZE );
++    uint8_t header[STATED_HEADER_SIZE];
++    const size_t i_header = __MIN( (size_t) pd.buf_size, sizeof(header) );
++    memcpy( header, pd.buf, i_header );
+ 
+     if( p_demux->psz_file )
+         psz_url = strdup( p_demux->psz_file );
+@@ -424,6 +478,9 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+                                             p_sys->ic->bit_rate + 400LL * i_channels );
+     }
+ 
++    if( p_sys->ic->duration == AV_NOPTS_VALUE )
++        p_sys->ic->duration = StatedDuration( p_sys->ic, header, i_header );
++
+     p_sys->tracks = calloc( nb_streams, sizeof(*p_sys->tracks) );
+     if( !p_sys->tracks )
+     {
+-- 
+2.55.0
+

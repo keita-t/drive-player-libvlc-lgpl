@@ -1,0 +1,74 @@
+From 25ce9e4d13f3a3f3722cd99a018d02d00b213e06 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:34:15 +0900
+Subject: [PATCH] avi: count the chunks of sound of variable size that states
+ no block
+
+Compressed sound of variable size (a sample size of 0) is timed by its
+blocks, the scale counting the samples of one. A header that states no
+block size has a frame to a chunk, but the demuxer took a block of a byte
+and counted each chunk by its bytes: On2 AVC, half a kilobyte a chunk,
+was timed a hundred seconds a chunk, and its decoder waited for times
+minutes away, so that it stayed silent after its first frames.
+
+Count such a track's chunks, packetized as before. A seek counts the
+blocks before the chunk as reading does: one a chunk without a block
+size, the bytes of each in blocks otherwise. It had the two the other
+way round, dividing by a block size of 0.
+---
+ modules/demux/avi/avi.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index e5813e7..40ba395 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -544,6 +544,9 @@ static int Open( vlc_object_t * p_this )
+                     tk->fmt.i_codec = AVI_FourccGetCodec( AUDIO_ES, p_wf->wFormatTag );
+ 
+                 tk->i_blocksize = p_wf->nBlockAlign;
++                /* Whether its chunks are its frames, counted with no block size
++                 * but packetized as compressed sound of a block size is. */
++                bool b_frame_chunks = false;
+ 
+                 /* Fix blocksize == 0 and force interleaving PCM chunks samplesize == 0 */
+                 if( tk->i_samplesize == 0 || tk->i_blocksize == 0 )
+@@ -559,6 +562,15 @@ static int Open( vlc_object_t * p_this )
+                             tk->i_samplesize = tk->i_blocksize;
+                         tk->fmt.b_packetized = true;
+                     }
++                    /* Compressed sound of variable size (samplesize 0) whose
++                     * header states no block size has a frame to a chunk, as
++                     * its scale counts the samples of one: count its chunks.
++                     * A block of a byte would time each chunk by its bytes
++                     * (On2 AVC: a hundred seconds a chunk). */
++                    else if( tk->i_blocksize == 0 && tk->i_samplesize == 0 )
++                    {
++                        b_frame_chunks = true;
++                    }
+                     else if( tk->i_blocksize == 0 )
+                     {
+                         tk->i_blocksize = 1;
+@@ -605,7 +617,7 @@ static int Open( vlc_object_t * p_this )
+                 tk->fmt.i_bitrate               = p_wf->nAvgBytesPerSec*8;
+                 tk->fmt.audio.i_blockalign      = p_wf->nBlockAlign;
+                 tk->fmt.audio.i_bitspersample   = p_wf->wBitsPerSample;
+-                tk->fmt.b_packetized            = !tk->i_blocksize;
++                tk->fmt.b_packetized            = !tk->i_blocksize && !b_frame_chunks;
+ 
+                 avi_chunk_list_t *p_info = AVI_ChunkFind( p_riff, AVIFOURCC_INFO, 0, true );
+                 if( p_info )
+@@ -2258,7 +2270,9 @@ static int AVI_TrackSeek( demux_t *p_demux,
+ 
+         if( tk->fmt.i_cat == AUDIO_ES )
+         {
+-            if( tk->i_blocksize > 0 )
++            /* The blocks before the chunk, counted as reading counts them:
++             * one a chunk with no block size, its bytes in blocks otherwise. */
++            if( tk->i_blocksize == 0 )
+             {
+                 tk->i_blockno = tk->i_idxposc;
+             }
+-- 
+2.55.0
+

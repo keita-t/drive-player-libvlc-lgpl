@@ -1,0 +1,38 @@
+From abd6b58bb58eada2639ac80711b75c79368311aa Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:47:47 +0900
+Subject: [PATCH 41/49] avi: keep the fourcc of Ut Video variants for the
+ decoder
+
+The demuxer replaced every Ut Video fourcc with the canonical ULRA one,
+and the avcodec decoder, which tells the variants apart by the fourcc
+it is given, then read a 4:2:0 (ULY0) picture as an RGBA one and output
+nothing. The original fourcc is kept, as it already is for SpeedHQ,
+whose decoder needs it for the same reason.
+---
+ modules/demux/avi/avi.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/modules/demux/avi/avi.c b/modules/demux/avi/avi.c
+index bc1f831..820a8f9 100644
+--- a/modules/demux/avi/avi.c
++++ b/modules/demux/avi/avi.c
+@@ -743,8 +743,13 @@ static int Open( vlc_object_t * p_this )
+                     tk->fmt.i_original_fourcc = VLC_FOURCC('a','v','c','1');
+                 }
+ 
+-                /* Store original fourcc for SpeedHQ variants so decoder can distinguish between them */
+-                if( tk->fmt.i_codec == VLC_CODEC_SPEEDHQ && tk->fmt.i_original_fourcc == 0 )
++                /* Store original fourcc for SpeedHQ and Ut Video variants so decoder
++                 * can distinguish between them: Ut Video's decoder takes its planes
++                 * and their order from the fourcc (ULY0, ULY2, ULRG, ULRA...), and
++                 * would read 4:2:0 pictures as the canonical RGBA one. */
++                if( ( tk->fmt.i_codec == VLC_CODEC_SPEEDHQ ||
++                      tk->fmt.i_codec == VLC_CODEC_UTVIDEO ) &&
++                    tk->fmt.i_original_fourcc == 0 )
+                 {
+                     tk->fmt.i_original_fourcc = p_bih->biCompression;
+                 }
+-- 
+2.55.0
+

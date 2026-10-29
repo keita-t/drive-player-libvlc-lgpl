@@ -1,0 +1,68 @@
+From 9162592ea5a1a0f403739be0907e7068dfd27efb Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 25 Oct 2026 19:26:09 +0900
+Subject: [PATCH] tta: say the time of the frame it last sent
+
+The demuxer said the time of the frame after the one it last sent, a
+second further on, while its reference is the start of the one it sent.
+The input, saying the time as the clock plays past the reference, said
+it a second ahead. Say the time of the frame last sent, or of the one a
+seek put the stream at.
+---
+ modules/demux/tta.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/tta.c b/modules/demux/tta.c
+index 4857731..7712313 100644
+--- a/modules/demux/tta.c
++++ b/modules/demux/tta.c
+@@ -68,6 +68,9 @@ struct demux_sys_t
+     /* */
+     uint32_t i_totalframes;
+     uint32_t i_currentframe;
++    /* The frame the time is of: the one last sent, which the reference is
++     * the start of, or the one a seek put the stream at */
++    uint32_t i_timeframe;
+     uint32_t *pi_seektable;
+     uint32_t i_datalength;
+     int      i_framelength;
+@@ -137,6 +140,7 @@ static int Open( vlc_object_t * p_this )
+     p_sys->i_totalframes = p_sys->i_datalength / p_sys->i_framelength +
+                           ((p_sys->i_datalength % p_sys->i_framelength) != 0);
+     p_sys->i_currentframe = 0;
++    p_sys->i_timeframe = 0;
+     if( (INT_MAX - 22 - 4) / sizeof(uint32_t) < p_sys->i_totalframes )
+         goto error;
+ 
+@@ -214,6 +218,7 @@ static int Demux( demux_t *p_demux )
+     if( p_data == NULL ) return 0;
+     p_data->i_dts = p_data->i_pts = VLC_TICK_0 + (int64_t)(INT64_C(1000000) * p_sys->i_currentframe) * TTA_FRAMETIME;
+ 
++    p_sys->i_timeframe = p_sys->i_currentframe;
+     p_sys->i_currentframe++;
+ 
+     es_out_SetPCR( p_demux->out, p_data->i_dts );
+@@ -264,6 +269,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+                 if( vlc_stream_Seek( p_demux->s, tmp+p_sys->i_start ) )
+                     return VLC_EGENERIC;
+                 p_sys->i_currentframe = i;
++                p_sys->i_timeframe = i;
+                 return VLC_SUCCESS;
+             }
+             return VLC_EGENERIC;
+@@ -276,8 +282,11 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             return VLC_SUCCESS;
+ 
+         case DEMUX_GET_TIME:
++            /* The time of the frame last sent, its reference: the input
++             * takes the time from the clock past it. The next frame's, a
++             * second further on, had the time said that much ahead. */
+             pi64 = va_arg( args, int64_t * );
+-            *pi64 = INT64_C(1000000) * p_sys->i_currentframe * TTA_FRAMETIME;
++            *pi64 = INT64_C(1000000) * p_sys->i_timeframe * TTA_FRAMETIME;
+             return VLC_SUCCESS;
+ 
+         default:
+-- 
+2.55.0
+

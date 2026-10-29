@@ -1,0 +1,127 @@
+From f519033c07ce020582ca5a6e789052361203930f Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 15:59:10 +0900
+Subject: [PATCH] avformat: seek a gxf file to the key picture before the time
+
+FFmpeg's GXF demuxer seeks to the picture at the time asked, whether a key
+picture or not: it searches its index for any picture. A video decoder
+started from a picture that is not a key picture shows nothing until the
+next one, up to a group of pictures later: a seek or a paused picture came
+up to a second after the time asked (the next key picture), and a seek
+near the end showed nothing more.
+
+Read the file from a second before the time, two, four... up to sixteen
+seconds when that holds no key picture of the video played, and seek to
+the last key picture before the time: the demuxer seeks there exactly,
+and the pictures up to the time are decoded and not shown, as for the
+other formats.
+---
+ modules/demux/avformat/demux.c | 64 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 61 insertions(+), 3 deletions(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 739a731..be62502 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -106,6 +106,7 @@ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order );
+ static void UpdateSeekPoint( demux_t *p_demux, int64_t i_time );
+ static bool IsPlayedTrack( demux_t *p_demux, unsigned i );
+ static void ResetTime( demux_t *p_demux, int64_t i_time );
++static int SeekFrame( demux_t *p_demux, int64_t i_time );
+ static int ReopenAtStart( demux_t *p_demux );
+ 
+ static vlc_fourcc_t CodecTagToFourcc( uint32_t codec_tag )
+@@ -1155,6 +1156,63 @@ static void ResetTime( demux_t *p_demux, int64_t i_time )
+     }
+ }
+ 
++/* Seeks to [i_time], in AV_TIME_BASE units from the file's start time, as
++ * av_seek_frame() backward does. FFmpeg's GXF demuxer seeks to the picture at
++ * the time, key or not, and a decoder that starts from one that is not shows
++ * nothing until the next key picture, up to a group of pictures later. Seek
++ * it to the last key picture before the time instead, found reading from a
++ * second before (two, four... up to sixteen seconds when that holds none):
++ * the pictures up to the time are decoded and not shown (ResetTime). */
++static int SeekFrame( demux_t *p_demux, int64_t i_time )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    AVFormatContext *ic = p_sys->ic;
++    const int64_t i_start = ic->start_time != (int64_t)AV_NOPTS_VALUE ?
++                            ic->start_time : 0;
++    int i_video = -1;
++
++    if( !strcmp( p_sys->fmt->name, "gxf" ) )
++    {
++        for( unsigned i = 0; i < p_sys->i_tracks && i_video < 0; i++ )
++            if( ic->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
++                p_sys->tracks[i].p_es != NULL && IsPlayedTrack( p_demux, i ) )
++                i_video = i;
++    }
++    if( i_video < 0 || i_time <= i_start )
++        return av_seek_frame( ic, -1, i_time, AVSEEK_FLAG_BACKWARD );
++
++    const AVStream *p_stream = ic->streams[i_video];
++    for( int64_t i_lead = AV_TIME_BASE; ; i_lead *= 2 )
++    {
++        const int64_t i_from = __MAX( i_time - i_lead, i_start );
++        if( av_seek_frame( ic, -1, i_from, AVSEEK_FLAG_BACKWARD ) < 0 )
++            return -1;
++
++        int64_t i_key = AV_NOPTS_VALUE;
++        AVPacket pkt;
++        while( av_read_frame( ic, &pkt ) == 0 )
++        {
++            if( pkt.stream_index == i_video && pkt.dts != AV_NOPTS_VALUE )
++            {
++                const int64_t i_dts = av_rescale_q( pkt.dts, p_stream->time_base,
++                                                    AV_TIME_BASE_Q );
++                if( i_dts > i_time )
++                {
++                    av_packet_unref( &pkt );
++                    break;
++                }
++                if( pkt.flags & AV_PKT_FLAG_KEY )
++                    i_key = i_dts;
++            }
++            av_packet_unref( &pkt );
++        }
++        if( i_key != (int64_t)AV_NOPTS_VALUE )
++            return av_seek_frame( ic, -1, i_key, AVSEEK_FLAG_BACKWARD );
++        if( i_from <= i_start || i_lead >= 16 * AV_TIME_BASE )
++            return av_seek_frame( ic, -1, i_time, AVSEEK_FLAG_BACKWARD );
++    }
++}
++
+ /* Opens the file again from its start, in place of the format context a seek
+  * FFmpeg could not do left behind. The streams are those it had, in the same
+  * order; the length stays as opening settled it. */
+@@ -1267,7 +1325,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             /* If we have a duration, we prefer to seek by time
+                but if we don't, or if the seek fails, try BYTE seeking */
+             if( p_sys->ic->duration == (int64_t)AV_NOPTS_VALUE ||
+-                (av_seek_frame( p_sys->ic, -1, i64, AVSEEK_FLAG_BACKWARD ) < 0) )
++                (SeekFrame( p_demux, i64 ) < 0) )
+             {
+                 int64_t i_size = stream_Size( p_demux->s );
+                 i64 = (i_size * f);
+@@ -1304,7 +1362,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+             msg_Warn( p_demux, "DEMUX_SET_TIME: %"PRId64, i64 );
+ 
+-            if( av_seek_frame( p_sys->ic, -1, i64, AVSEEK_FLAG_BACKWARD ) < 0 )
++            if( SeekFrame( p_demux, i64 ) < 0 )
+             {
+                 /* A format with no way to find a time (MSN webcam, Motion
+                  * Pixels) has FFmpeg read the file through looking for it,
+@@ -1424,7 +1482,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+             msg_Warn( p_demux, "DEMUX_SET_SEEKPOINT: %"PRId64, i64 );
+ 
+-            if( av_seek_frame( p_sys->ic, -1, i64, AVSEEK_FLAG_BACKWARD ) < 0 )
++            if( SeekFrame( p_demux, i64 ) < 0 )
+             {
+                 return VLC_EGENERIC;
+             }
+-- 
+2.55.0
+

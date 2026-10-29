@@ -1,0 +1,96 @@
+From fbdd192abeefe4e9996bb2aac43c141b4f5f5a75 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 07:39:07 +0900
+Subject: [PATCH] avformat: open a file FFmpeg cannot seek again at its start
+
+FFmpeg finds a time in a format with no index and no way to seek of its
+own (an MSN webcam stream, Motion Pixels) by reading the file from its
+start, and fails when the pictures it reads say nothing of where they
+are. The file is then left at its end: a player that starts a picture
+over from the start by time, as one does when a window comes, ended the
+file instead.
+
+Open such a file again at its start when FFmpeg fails a seek: a seek to
+the start then succeeds, and one elsewhere fails with the file playing
+on from its start rather than ending. The streams are those it had, and
+the length stays as opening settled it.
+---
+ modules/demux/avformat/demux.c | 48 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 38e8245..bef8a56 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -101,6 +101,7 @@ static int64_t IOSeek( void *opaque, int64_t offset, int whence );
+ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order );
+ static void UpdateSeekPoint( demux_t *p_demux, int64_t i_time );
+ static void ResetTime( demux_t *p_demux, int64_t i_time );
++static int ReopenAtStart( demux_t *p_demux );
+ 
+ static vlc_fourcc_t CodecTagToFourcc( uint32_t codec_tag )
+ {
+@@ -1112,6 +1113,43 @@ static void ResetTime( demux_t *p_demux, int64_t i_time )
+     }
+ }
+ 
++/* Opens the file again from its start, in place of the format context a seek
++ * FFmpeg could not do left behind. The streams are those it had, in the same
++ * order; the length stays as opening settled it. */
++static int ReopenAtStart( demux_t *p_demux )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    AVFormatContext *old = p_sys->ic;
++    AVIOContext *pb = old->pb;
++
++    if( avio_seek( pb, 0, SEEK_SET ) < 0 )
++        return VLC_EGENERIC;
++
++    AVFormatContext *ic = avformat_alloc_context();
++    if( ic == NULL )
++        return VLC_ENOMEM;
++    /* Opened on the I/O wrapper of its own, which closing either context
++     * leaves to the demuxer. */
++    ic->pb = pb;
++    if( avformat_open_input( &ic, old->url, p_sys->fmt, NULL ) < 0 )
++        return VLC_EGENERIC;
++
++    vlc_avcodec_lock(); /* avformat calls avcodec behind our back!!! */
++    int i_ret = avformat_find_stream_info( ic, NULL );
++    vlc_avcodec_unlock();
++    if( i_ret < 0 || ic->nb_streams != old->nb_streams )
++    {
++        avformat_close_input( &ic );
++        return VLC_EGENERIC;
++    }
++    ic->duration = old->duration;
++
++    avformat_close_input( &old );
++    p_sys->ic = ic;
++    msg_Dbg( p_demux, "opened again at the start" );
++    return VLC_SUCCESS;
++}
++
+ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order )
+ {
+     if( p_pkt->size <= 0 )
+@@ -1226,7 +1264,15 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+             if( av_seek_frame( p_sys->ic, -1, i64, AVSEEK_FLAG_BACKWARD ) < 0 )
+             {
+-                return VLC_EGENERIC;
++                /* A format with no way to find a time (MSN webcam, Motion
++                 * Pixels) has FFmpeg read the file through looking for it,
++                 * which leaves it at its end. Its start is still found by
++                 * opening it again: a seek there succeeds, and one elsewhere
++                 * fails and has the file play on from its start. */
++                if( ReopenAtStart( p_demux ) )
++                    return VLC_EGENERIC;
++                ResetTime( p_demux, 0 );
++                return i64 <= i_start_time ? VLC_SUCCESS : VLC_EGENERIC;
+             }
+             ResetTime( p_demux, i64 - i_start_time );
+             return VLC_SUCCESS;
+-- 
+2.55.0
+

@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 17 Oct 2026 02:18:51 +0900
+Subject: [PATCH] es_out: describe a track before announcing it
+
+A track added to the input was announced (the video-es, audio-es or
+spu-es choice, which libVLC reports as an elementary stream added) before
+its format was recorded in the input item's tracks. A listener that reads
+the tracks when told one was added (libvlc_media_tracks_get, the Android
+bindings' track snapshot) could find the track missing, and nothing told
+it again: a later event, as the track's selection, used to make up for
+it only when the track was selected at once.
+
+Record the track's information first, when a track is added and when a
+program is selected again, then announce it.
+---
+ src/input/es_out.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index 318fb8b..488a0b7 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -1049,8 +1049,9 @@ static void EsOutProgramSelect( es_out_t *out, es_out_pgrm_t *p_pgrm )
+     {
+         if( p_sys->es[i]->p_pgrm == p_sys->p_pgrm )
+         {
+-            EsOutESVarUpdate( out, p_sys->es[i], false );
++            /* Described before announced, as EsOutAddSlave does. */
+             EsOutUpdateInfo( out, p_sys->es[i], &p_sys->es[i]->fmt, NULL );
++            EsOutESVarUpdate( out, p_sys->es[i], false );
+         }
+ 
+         EsOutSelect( out, p_sys->es[i], false );
+@@ -1639,10 +1640,13 @@ static es_out_id_t *EsOutAddSlave( es_out_t *out, const es_format_t *fmt, es_out
+ 
+     TAB_APPEND( p_sys->i_es, p_sys->es, es );
+ 
++    /* Describe the track before announcing it: a listener that reads the
++     * input's tracks when told one was added must find its format. */
++    EsOutUpdateInfo( out, es, &es->fmt, NULL );
++
+     if( es->p_pgrm == p_sys->p_pgrm )
+         EsOutESVarUpdate( out, es, false );
+ 
+-    EsOutUpdateInfo( out, es, &es->fmt, NULL );
+     EsOutSelect( out, es, false );
+ 
+     if( es->b_scrambled )

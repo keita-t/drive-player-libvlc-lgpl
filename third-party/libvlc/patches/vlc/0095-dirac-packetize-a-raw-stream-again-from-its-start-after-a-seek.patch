@@ -1,0 +1,120 @@
+From b2d544c302783629622263b28692c9673dc0c5e6 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 16:26:07 +0900
+Subject: [PATCH] dirac: packetize a raw stream again from its start after a
+ seek
+
+After a seek, the raw Dirac demuxer gave the packetizer a block flagged
+as a discontinuity, then dated the next data as the origin of the
+stream's time. The packetizer answers a discontinuity by inserting the
+end of a sequence, and the origin's date went to that end of a sequence,
+which dates nothing: the pictures after were undated, and none was shown
+(as at the start, where the input seeks to the start of the stream
+before playing it).
+
+Create the packetizer anew instead, as when the demuxer opens: the first
+data the seek reads is the origin of its time again.
+---
+ modules/demux/dirac.c | 55 +++++++++++++++++++++++--------------------
+ 1 file changed, 30 insertions(+), 25 deletions(-)
+
+diff --git a/modules/demux/dirac.c b/modules/demux/dirac.c
+index 63fe789..89443fd 100644
+--- a/modules/demux/dirac.c
++++ b/modules/demux/dirac.c
+@@ -71,8 +71,7 @@ struct demux_sys_t
+ 
+     enum {
+         /* demuxer states, do not reorder (++ is used) */
+-        DIRAC_DEMUX_DISCONT = 0, /* signal a discontinuity to packetizer */
+-        DIRAC_DEMUX_FIRST, /* provide an origin timestamp for the packetizer */
++        DIRAC_DEMUX_FIRST = 0, /* provide an origin timestamp for the packetizer */
+         DIRAC_DEMUX_STEADY, /* normal operation */
+     } i_state;
+ 
+@@ -158,29 +157,17 @@ static int Demux( demux_t *p_demux)
+ 
+     bool b_eof = false;
+ 
+-    if( p_sys->i_state == DIRAC_DEMUX_DISCONT )
++    p_block_in = vlc_stream_Block( p_demux->s, DIRAC_PACKET_SIZE );
++    if( !p_block_in )
+     {
+-        p_sys->i_state++;
+-        p_block_in = block_Alloc( 128 );
+-        if( p_block_in )
+-        {
+-            p_block_in->i_flags = BLOCK_FLAG_DISCONTINUITY | BLOCK_FLAG_CORRUPTED;
+-        }
++        b_eof = true;
+     }
+-    else
++    else if ( p_sys->i_state == DIRAC_DEMUX_FIRST)
+     {
+-        p_block_in = vlc_stream_Block( p_demux->s, DIRAC_PACKET_SIZE );
+-        if( !p_block_in )
+-        {
+-            b_eof = true;
+-        }
+-        else if ( p_sys->i_state == DIRAC_DEMUX_FIRST)
+-        {
+-            p_sys->i_state++;
+-            /* by default, timestamps are invalid.
+-             * Except when we need an anchor point */
+-            p_block_in->i_dts = VLC_TICK_0;
+-        }
++        p_sys->i_state++;
++        /* by default, timestamps are invalid.
++         * Except when we need an anchor point */
++        p_block_in->i_dts = VLC_TICK_0;
+     }
+ 
+     while( (p_block_out = p_sys->p_packetizer->pf_packetize( p_sys->p_packetizer,
+@@ -218,6 +205,25 @@ static int Demux( demux_t *p_demux)
+ /*****************************************************************************
+  * Control:
+  *****************************************************************************/
++/* After a seek, the stream is packetized again as from its start: its first
++ * data dated anew as the origin. A discontinuity given to the packetizer
++ * instead has it insert the end of a sequence, which takes the origin's
++ * date and leaves the pictures after undated. */
++static int Restart( demux_t *p_demux )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    es_format_t fmt;
++
++    es_format_Init( &fmt, VIDEO_ES, VLC_CODEC_DIRAC );
++    decoder_t *p_packetizer = demux_PacketizerNew( p_demux, &fmt, "dirac" );
++    if( !p_packetizer )
++        return VLC_EGENERIC;
++    demux_PacketizerDestroy( p_sys->p_packetizer );
++    p_sys->p_packetizer = p_packetizer;
++    p_sys->i_state = DIRAC_DEMUX_FIRST;
++    return VLC_SUCCESS;
++}
++
+ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
+     demux_sys_t *p_sys  = p_demux->p_sys;
+@@ -244,8 +250,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+          * at: its pictures are timed from it again. */
+         if( va_arg( args, vlc_tick_t ) != 0 || vlc_stream_Seek( p_demux->s, 0 ) )
+             return VLC_EGENERIC;
+-        p_sys->i_state = DIRAC_DEMUX_DISCONT;
+-        return VLC_SUCCESS;
++        return Restart( p_demux );
+     }
+     else
+     {
+@@ -254,7 +259,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+          * origin would put them behind the clock. */
+         int i_ret = demux_vaControlHelper( p_demux->s, 0, -1, 0, 1, i_query, args );
+         if( i_ret == VLC_SUCCESS && DEMUX_SET_POSITION == i_query )
+-            p_sys->i_state = DIRAC_DEMUX_DISCONT;
++            i_ret = Restart( p_demux );
+         return i_ret;
+     }
+ }
+-- 
+2.55.0
+

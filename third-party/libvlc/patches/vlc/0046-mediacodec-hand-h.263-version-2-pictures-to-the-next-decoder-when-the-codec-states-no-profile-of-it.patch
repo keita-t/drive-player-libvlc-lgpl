@@ -1,0 +1,124 @@
+From 17280a6443197e360e4c11d76e85d4e898e5f2c3 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 11:02:55 +0900
+Subject: [PATCH 46/49] mediacodec: hand H.263 version 2 pictures to the next
+ decoder when the codec states no profile of it
+
+An H.263 decoder is chosen by MIME type alone. A codec stating only the
+Baseline profile (OMX.qcom.video.decoder.h263 on sdm660) accepted a
+stream whose pictures have the extended picture type of H.263 version 2
+(PLUSPTYPE, as for a custom picture size) and reported a hardware error
+after consuming input: the decoder that took over started at the next
+intra picture, and the pictures before it were lost. Map the platform's
+H.263 profile constants to the profiles of H.263 Annex X, read the first
+picture header, and when it has the extended picture type and the
+opened codec states no profile of version 2, reload before queueing
+anything: the core keeps the block for the next decoder.
+---
+ modules/codec/omxil/mediacodec.c     | 55 ++++++++++++++++++++++++++++
+ modules/codec/omxil/mediacodec_jni.c |  9 +++++
+ 2 files changed, 64 insertions(+)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 5d61e33..24494aa 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -112,6 +112,8 @@ struct decoder_sys_t
+     bool            b_vp9_profile_checked;
+     /* The MPEG-4 Part 2 video object layer was checked for B-VOPs. */
+     bool            b_mp4v_delay_checked;
++    /* The first H.263 picture header was checked against the codec. */
++    bool            b_h263_version_checked;
+     int             i_decode_flags;
+ 
+     union
+@@ -1640,6 +1642,37 @@ static bool CodecSupportsProfile(decoder_t *p_dec, int profile)
+     return supported;
+ }
+ 
++/* Whether the H.263 picture the block starts with has the extended picture
++ * type of H.263 version 2 (PLUSPTYPE), or -1 when the block does not start
++ * with a picture. */
++static int H263_IsVersion2(const block_t *p_block)
++{
++    if (p_block->i_buffer < 5)
++        return -1;
++
++    bs_t s;
++    bs_init(&s, p_block->p_buffer, p_block->i_buffer);
++    if (bs_read(&s, 22) != 0x20)    /* picture start code */
++        return -1;
++    bs_skip(&s, 8);                 /* temporal reference */
++    if (bs_read(&s, 2) != 0x2)      /* PTYPE: marker bits */
++        return -1;
++    bs_skip(&s, 3);                 /* split screen, document camera, freeze */
++    return bs_read(&s, 3) == 0x7;   /* source format: extended PTYPE */
++}
++
++/* Whether the opened codec states an H.263 profile of version 2, which
++ * brought the extended picture type: any but Baseline (0) and Version 1
++ * Backward-Compatibility (2), as H.263 Annex X numbers them. */
++static bool CodecSupportsH263Version2(decoder_t *p_dec)
++{
++    static const int profiles[] = { 3, 1, 4, 5, 6, 7, 8 };
++    for (size_t i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
++        if (CodecSupportsProfile(p_dec, profiles[i]))
++            return true;
++    return false;
++}
++
+ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -1734,6 +1767,28 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
++    /* An H.263 decoder is chosen by MIME type alone, and a codec stating
++     * only the profiles of the first H.263 version can fail on a picture with
++     * the extended picture type of version 2 after consuming input
++     * (OMX.qcom.video.decoder.h263 on sdm660 reports a hardware error), losing
++     * the pictures before the next intra picture. Check the first picture
++     * header against the codec and hand such a stream to the next decoder
++     * before queueing anything: the core keeps this block for it. */
++    if (p_dec->fmt_in.i_codec == VLC_CODEC_H263 && !p_sys->b_h263_version_checked)
++    {
++        const int i_version2 = H263_IsVersion2(p_in_block);
++        if (i_version2 >= 0)
++        {
++            p_sys->b_h263_version_checked = true;
++            if (i_version2 && !CodecSupportsH263Version2(p_dec))
++            {
++                msg_Warn(p_dec, "%s states no H.263 version 2 profile",
++                         p_sys->api.psz_name);
++                goto reload;
++            }
++        }
++    }
++
+     /* Parse input block */
+     if ((i_ret = p_sys->pf_on_new_block(p_dec, &p_in_block)) != 1)
+     {
+diff --git a/modules/codec/omxil/mediacodec_jni.c b/modules/codec/omxil/mediacodec_jni.c
+index cff296f..9b9dcfd 100644
+--- a/modules/codec/omxil/mediacodec_jni.c
++++ b/modules/codec/omxil/mediacodec_jni.c
+@@ -487,6 +487,15 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
+                                     break;
+                             }
+                         }
++                        else if (strcmp(psz_mime, "video/3gpp") == 0)
++                        {
++                            /* H263ProfileBaseline (0x1) to
++                             * H263ProfileHighLatency (0x100): a bit a profile,
++                             * in the order of H.263 Annex X. */
++                            for (int p = 0; p <= 8; p++)
++                                if (omx_profile == 1 << p)
++                                    codec_profile = p;
++                        }
+                         if (codec_profile != profile)
+                             continue;
+                         /* Some encoders set the level too high, thus we ignore it for the moment.
+-- 
+2.55.0
+

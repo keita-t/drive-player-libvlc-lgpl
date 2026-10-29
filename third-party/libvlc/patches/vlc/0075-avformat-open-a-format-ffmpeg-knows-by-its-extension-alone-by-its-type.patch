@@ -1,0 +1,67 @@
+From 9bf4194ba93e7d8a525eebe0ea14842e12538235 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 22:07:59 +0900
+Subject: [PATCH] avformat: open a format FFmpeg knows by its extension alone
+ by its type
+
+FFmpeg recognises some formats by their file name's extension alone, not
+by probing their bytes: Motion Pixels (.mvi) among them. An input handed
+over with its type but no file name was not recognised as one, and the
+permissive MPEG-PS demuxer took it, finding nothing to play.
+
+Name the format by the input's type, video/x-mvi, as FFmpeg would by its
+extension. Bytes the format does not match still fail to open, and the
+other demuxers probe them.
+---
+ modules/demux/avformat/demux.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index c0f6852..98ce79b 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -249,6 +249,25 @@ static int64_t StatedDuration( AVFormatContext *ic, const uint8_t *p_header,
+     return AV_NOPTS_VALUE;
+ }
+ 
++/* The format FFmpeg recognises by its extension alone, without probing its
++ * bytes, that an input of type [psz_mime] is in, or NULL: an input handed over
++ * by its type, without a file name, is not recognised otherwise. */
++static const char *FormatOfMimeType( const char *psz_mime )
++{
++    static const struct
++    {
++        char psz_mime[16];
++        char psz_format[8];
++    } formats[] = {
++        { "video/x-mvi", "mvi" }, /* Motion Pixels */
++    };
++
++    for( size_t i = 0; i < ARRAY_SIZE(formats); i++ )
++        if( !strcasecmp( psz_mime, formats[i].psz_mime ) )
++            return formats[i].psz_format;
++    return NULL;
++}
++
+ int avformat_OpenDemux( vlc_object_t *p_this )
+ {
+     demux_t       *p_demux = (demux_t*)p_this;
+@@ -306,6 +325,15 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+         free( psz_format );
+     }
+ 
++    if( fmt == NULL )
++    {
++        char *psz_mime = stream_MimeType( p_demux->s );
++        const char *psz_typed = psz_mime ? FormatOfMimeType( psz_mime ) : NULL;
++        if( psz_typed && (fmt = av_find_input_format( psz_typed )) )
++            msg_Dbg( p_demux, "format of the type %s: %s", psz_mime, fmt->name );
++        free( psz_mime );
++    }
++
+     if( fmt == NULL )
+         fmt = av_probe_input_format( &pd, 1 );
+ 
+-- 
+2.55.0
+

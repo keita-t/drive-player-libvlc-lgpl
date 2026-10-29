@@ -1,0 +1,96 @@
+From bf6fc318a4afe4d91362683d08b2950eba55fd45 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 23 Oct 2026 07:10:22 +0900
+Subject: [PATCH] wav: read G.726 in frames of 20 ms
+
+The WAV demuxer reads G.726 a block at a time, as it reads GSM, and
+the block of G.726 is commonly a single byte: two samples, a quarter of
+a millisecond, at 32 kbit/s. The audio output, dating each of the 4000
+frames a second, found the playback too early and too late by turns,
+resampled to catch up and stopped, and the tone came out off its pitch,
+the sound warbling. A block of one byte also cut the 3 and 5 bit code
+words, which straddle bytes, for the decoder, which reads the bits of
+each frame from its start.
+
+Read 20 ms at once, in whole groups of 8 code words, which take as many
+bytes as a code word takes bits and so end on a code word, with the
+code word size the decoder takes (the bitrate over the sampling rate),
+and seek to the start of such a frame.
+---
+ modules/demux/wav.c | 39 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/modules/demux/wav.c b/modules/demux/wav.c
+index 7619734..ba13526 100644
+--- a/modules/demux/wav.c
++++ b/modules/demux/wav.c
+@@ -87,6 +87,7 @@ static int FrameInfo_MS_ADPCM ( unsigned int *, unsigned *, const es_format_t *
+ static int FrameInfo_Creative_ADPCM( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_PCM      ( unsigned int *, unsigned *, const es_format_t * );
+ static int FrameInfo_MSGSM    ( unsigned int *, unsigned *, const es_format_t * );
++static int FrameInfo_G726     ( unsigned int *, unsigned *, const es_format_t * );
+ 
+ /*****************************************************************************
+  * Open: check file and initializes structures
+@@ -376,8 +377,12 @@ static int Open( vlc_object_t * p_this )
+     case VLC_CODEC_A52:
+         /* FIXME set end of area FIXME */
+         goto error;
+-    case VLC_CODEC_GSM_MS:
+     case VLC_CODEC_ADPCM_G726:
++        if( FrameInfo_G726( &p_sys->i_frame_size, &p_sys->i_frame_samples,
++                            &p_sys->fmt ) )
++            goto error;
++        break;
++    case VLC_CODEC_GSM_MS:
+     case VLC_CODEC_TRUESPEECH:
+     case VLC_CODEC_ATRAC3P:
+     case VLC_CODEC_ATRAC3:
+@@ -515,9 +520,13 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+     if( p_sys->i_data_size > 0 )
+         i_end = p_sys->i_data_pos + p_sys->i_data_size;
+ 
++    /* A G.726 code word may straddle bytes: seek to the start of a frame,
++     * which starts with one */
+     return demux_vaControlHelper( p_demux->s, p_sys->i_data_pos, i_end,
+                                    p_sys->fmt.i_bitrate,
+-                                   p_sys->fmt.audio.i_blockalign,
++                                   p_sys->fmt.i_codec == VLC_CODEC_ADPCM_G726 ?
++                                       p_sys->i_frame_size :
++                                       p_sys->fmt.audio.i_blockalign,
+                                    i_query, args );
+ }
+ 
+@@ -644,3 +653,29 @@ static int FrameInfo_MSGSM( unsigned int *pi_size, unsigned *pi_samples,
+     return VLC_SUCCESS;
+ }
+ 
++static int FrameInfo_G726( unsigned int *pi_size, unsigned *pi_samples,
++                           const es_format_t *p_fmt )
++{
++    /* G.726 codes each sample on 2 to 5 bits, packed across bytes, and its
++     * block is commonly a single byte. Frames of a block carried a quarter
++     * of a millisecond each: the audio output, dating every one, drifted
++     * back and forth and resampled the sound off its pitch. Read 20 ms at
++     * once instead, in whole groups of 8 code words, which take as many
++     * bytes as a code word takes bits and so end on a code word: the
++     * decoder reads the bits of each frame from its start. The code word size is the
++     * one the decoder takes (the bitrate over the sampling rate). */
++    if( p_fmt->i_bitrate <= 0 || p_fmt->audio.i_rate == 0 ||
++        p_fmt->audio.i_channels == 0 )
++        return VLC_EGENERIC;
++
++    const unsigned i_bits = p_fmt->i_bitrate /
++                            ( p_fmt->audio.i_rate * p_fmt->audio.i_channels );
++    if( i_bits < 2 || i_bits > 5 )
++        return FrameInfo_MSGSM( pi_size, pi_samples, p_fmt );
++
++    const unsigned i_groups = __MAX( p_fmt->audio.i_rate / 50 / 8, 1 );
++    *pi_size = i_groups * i_bits * p_fmt->audio.i_channels;
++    *pi_samples = i_groups * 8;
++
++    return VLC_SUCCESS;
++}
+-- 
+2.55.0
+

@@ -1,0 +1,69 @@
+From 6e1116eba57a226196c29cbbc4baf0704deb8bf1 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 17:21:12 +0900
+Subject: [PATCH] avcodec: copy a frame out of a lent picture whose planes the
+ decoder moved
+
+A decoder given a picture for direct rendering can return its frame with
+the planes moved inside it: the AMV decoder shows its pictures upside down
+by starting each plane at its last line and running its lines backwards.
+The lent picture was shown as it was, its planes not moved, so an AMV video
+stood upside down.
+
+Copy such a frame out of the picture, as without direct rendering, with its
+lines read in the direction they run.
+---
+ modules/codec/avcodec/video.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index ae55ffd..8c61bd9 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -378,9 +378,10 @@ static int lavc_CopyPicture(decoder_t *dec, picture_t *pic, AVFrame *frame)
+     {
+         const uint8_t *src = frame->data[plane];
+         uint8_t *dst = pic->p[plane].p_pixels;
+-        size_t src_stride = frame->linesize[plane];
++        /* A frame shown upside down runs its lines backwards (AMV) */
++        ptrdiff_t src_stride = frame->linesize[plane];
+         size_t dst_stride = pic->p[plane].i_pitch;
+-        size_t size = __MIN(src_stride, dst_stride);
++        size_t size = __MIN((size_t) abs(frame->linesize[plane]), dst_stride);
+ 
+         for (int line = 0; line < pic->p[plane].i_visible_lines; line++)
+         {
+@@ -392,6 +393,18 @@ static int lavc_CopyPicture(decoder_t *dec, picture_t *pic, AVFrame *frame)
+     return VLC_SUCCESS;
+ }
+ 
++/* Whether a decoder left the planes of the picture lent to it for direct
++ * rendering where they were: one can move them, as the AMV decoder shows its
++ * pictures upside down by starting each plane at its last line. */
++static bool lavc_KeptLentPlanes(const AVFrame *frame, const picture_t *pic)
++{
++    for (int i = 0; i < pic->i_planes; i++)
++        if (frame->data[i] != pic->p[i].p_pixels ||
++            frame->linesize[i] != pic->p[i].i_pitch)
++            return false;
++    return true;
++}
++
+ static int OpenVideoCodec( decoder_t *p_dec )
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -1377,6 +1390,11 @@ static picture_t *DecodeBlock( decoder_t *p_dec, block_t **pp_block, bool *error
+         }
+ 
+         picture_t *p_pic = frame->opaque;
++        /* A lent picture whose planes the decoder moved is not the frame it
++         * decoded: copy the frame out of it, as without direct rendering. */
++        if( p_pic != NULL && p_sys->p_va == NULL &&
++            !lavc_KeptLentPlanes( frame, p_pic ) )
++            p_pic = NULL;
+         if( p_pic == NULL )
+         {   /* When direct rendering is not used, get_format() and get_buffer()
+              * might not be called. The output video format must be set here
+-- 
+2.55.0
+

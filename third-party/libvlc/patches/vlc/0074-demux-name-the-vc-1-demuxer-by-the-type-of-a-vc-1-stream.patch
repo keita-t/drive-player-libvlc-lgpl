@@ -1,0 +1,32 @@
+From 06b7788ca2af59d491efb223282ab0fa82352c91 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 21:47:30 +0900
+Subject: [PATCH] demux: name the VC-1 demuxer by the type of a VC-1 stream
+
+The demuxer of VC-1 elementary streams is tried only when named, by an
+extension the input is not given or by force, and checks for a sequence
+header itself. A VC-1 stream handed over with its type, video/vc1, was
+opened by the demuxer of MPEG video elementary streams instead, and
+showed nothing.
+
+Name it by that type, as the table names the NSV demuxer by its own.
+---
+ src/input/demux.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/input/demux.c b/src/input/demux.c
+index 847f8bf..abb9ddd 100644
+--- a/src/input/demux.c
++++ b/src/input/demux.c
+@@ -68,6 +68,8 @@ static const char *demux_NameFromMimeType(const char *mime)
+         { "video/MP2T",          "ts"      },
+         { "video/nsa",           "nsv"     },
+         { "video/nsv",           "nsv"     },
++        /* A VC-1 elementary stream: its demuxer probes only when named */
++        { "video/vc1",           "vc1"     },
+     };
+     demux_mapping *type = demux_lookup( mime, types, ARRAY_SIZE( types ) );
+     return (type != NULL) ? type->name : "any";
+-- 
+2.55.0
+

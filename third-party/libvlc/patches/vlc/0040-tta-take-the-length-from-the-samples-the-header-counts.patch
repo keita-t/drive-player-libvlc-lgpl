@@ -1,0 +1,48 @@
+From 73c0f79f78130011d4bed5ad5e3e1cb070b074d8 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 10:47:37 +0900
+Subject: [PATCH 40/49] tta: take the length from the samples the header counts
+
+The length was the number of frames times a full frame's duration, so the
+last frame, which holds only the samples that remain, counted as a whole
+one: a six-second file reported 6.27 s, and its end came before the
+length the slider showed. The header states the number of samples; the
+length is that many at the sample rate.
+---
+ modules/demux/tta.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/tta.c b/modules/demux/tta.c
+index bf1ea54..4857731 100644
+--- a/modules/demux/tta.c
++++ b/modules/demux/tta.c
+@@ -71,6 +71,7 @@ struct demux_sys_t
+     uint32_t *pi_seektable;
+     uint32_t i_datalength;
+     int      i_framelength;
++    uint32_t i_rate;
+ 
+     /* */
+     vlc_meta_t     *p_meta;
+@@ -131,6 +132,7 @@ static int Open( vlc_object_t * p_this )
+ 
+     p_sys->i_datalength = GetDWLE( &p_header[14] );
+     p_sys->i_framelength = TTA_FRAMETIME * fmt.audio.i_rate;
++    p_sys->i_rate = fmt.audio.i_rate;
+ 
+     p_sys->i_totalframes = p_sys->i_datalength / p_sys->i_framelength +
+                           ((p_sys->i_datalength % p_sys->i_framelength) != 0);
+@@ -268,7 +270,9 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+         case DEMUX_GET_LENGTH:
+             pi64 = va_arg( args, int64_t * );
+-            *pi64 = INT64_C(1000000) * p_sys->i_totalframes * TTA_FRAMETIME;
++            /* The header counts the samples: the last frame holds only what
++             * is left of them, and is shorter than the others. */
++            *pi64 = INT64_C(1000000) * p_sys->i_datalength / p_sys->i_rate;
+             return VLC_SUCCESS;
+ 
+         case DEMUX_GET_TIME:
+-- 
+2.55.0
+

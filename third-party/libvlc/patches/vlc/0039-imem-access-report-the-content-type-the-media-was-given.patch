@@ -1,0 +1,87 @@
+From 7552d5919cc3d1961f6d6a7bd5407ffe5529ffce Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 07:42:34 +0900
+Subject: [PATCH] imem-access: report the content type the media was given
+
+libvlc_media_new_callbacks media carry no name and no type, so every
+demuxer that selects its input by its type or its name, rather than by
+its bytes alone, refused them: an H.264 or HEVC elementary stream, whose
+demuxer opens only what is named or typed as one, could not be played
+from callbacks, and libavformat declines both for their lack of
+timestamps. An application that knows what its bytes are can now say so
+with the imem-content-type option, which the access reports as the
+stream's content type. Media without it report none, as before.
+---
+ modules/access/imem-access.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/modules/access/imem-access.c b/modules/access/imem-access.c
+index 418827a..32e5d72 100644
+--- a/modules/access/imem-access.c
++++ b/modules/access/imem-access.c
+@@ -23,6 +23,8 @@
+ #endif
+ #include <assert.h>
+ #include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ #include <vlc_common.h>
+ #include <vlc_access.h>
+@@ -41,6 +43,7 @@ struct access_sys_t
+     int (*seek_cb)(void *, uint64_t);
+     void (*close_cb)(void *);
+     uint64_t size;
++    char *content_type;
+ };
+ 
+ static ssize_t Read(stream_t *access, void *buf, size_t len)
+@@ -100,6 +103,19 @@ static int Control(stream_t *access, int query, va_list args)
+             *va_arg(args, int64_t *) = DEFAULT_PTS_DELAY;
+             break;
+ 
++        case STREAM_GET_CONTENT_TYPE:
++            /* The callbacks carry no name, so a demuxer that selects its
++             * input by type, and not by its bytes alone, learns it here. */
++        {
++            if (sys->content_type == NULL)
++                return VLC_EGENERIC;
++            char *type = strdup(sys->content_type);
++            if (unlikely(type == NULL))
++                return VLC_ENOMEM;
++            *va_arg(args, char **) = type;
++            break;
++        }
++
+         case STREAM_SET_PAUSE_STATE:
+             break;
+ 
+@@ -146,6 +162,8 @@ static int Open(vlc_object_t *object)
+         return VLC_EGENERIC;
+     }
+ 
++    sys->content_type = var_InheritString(access, "imem-content-type");
++
+     access->pf_read = Read;
+     access->pf_block = NULL;
+     access->pf_seek = (sys->seek_cb != NULL) ? Seek : NULL;
+@@ -162,6 +180,7 @@ static void Close(vlc_object_t *object)
+ 
+     if (sys->close_cb != NULL)
+         sys->close_cb(sys->opaque);
++    free(sys->content_type);
+ }
+ 
+ vlc_module_begin()
+@@ -173,4 +192,8 @@ vlc_module_begin()
+     add_shortcut("imem")
+     set_capability("access", 0)
+     set_callbacks(Open, Close)
++
++    add_string("imem-content-type", NULL, N_("Content type"),
++               N_("MIME type of the media the callbacks read."), true)
++        change_safe()
+ vlc_module_end()
+-- 
+2.55.0
+

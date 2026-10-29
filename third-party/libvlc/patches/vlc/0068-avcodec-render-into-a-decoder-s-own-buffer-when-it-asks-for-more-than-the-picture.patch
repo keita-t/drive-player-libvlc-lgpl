@@ -1,0 +1,48 @@
+From c3151ade979a9fbc9963c032f8bdc8ce1aa56782 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 16:36:00 +0900
+Subject: [PATCH] avcodec: render into a decoder's own buffer when it asks
+ for more than the picture
+
+A decoder can ask for a frame larger than its picture: the Dirac decoder asks
+for an edge around it and moves the planes inside. The picture lent for
+direct rendering, made for the output format, was checked against that size
+by assertions alone; in a build without them the decoder wrote past the
+picture's planes into the next ones, and the picture shown, its planes not
+moved, was off by the edge. A Dirac video showed coloured pictures and a
+misshapen frame.
+
+Give such a decoder its own buffer, as for a picture not aligned for it,
+and copy its pictures out.
+---
+ modules/codec/avcodec/video.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 971748c..ae55ffd 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -1626,9 +1626,17 @@ static int lavc_dr_GetFrame(struct AVCodecContext *ctx, AVFrame *frame,
+ 
+     avcodec_align_dimensions2(ctx, &width, &height, aligns);
+ 
+-    /* Check that the picture is suitable for libavcodec */
+-    assert(pic->p[0].i_pitch >= width * pic->p[0].i_pixel_pitch);
+-    assert(pic->p[0].i_lines >= height);
++    /* Check that the picture is suitable for libavcodec. A decoder can ask for
++     * more than its picture: the Dirac decoder asks for an edge around it and
++     * moves the planes inside. A picture of the output format cannot hold it. */
++    if (pic->p[0].i_pitch < width * pic->p[0].i_pixel_pitch ||
++        pic->p[0].i_lines < height)
++    {
++        if (!atomic_exchange(&sys->b_dr_failure, true))
++            msg_Warn(dec, "%dx%d asked for, larger than the picture: "
++                     "disabling direct rendering", width, height);
++        goto error;
++    }
+ 
+     for (int i = 0; i < pic->i_planes; i++)
+     {
+-- 
+2.55.0
+

@@ -1,0 +1,143 @@
+From 65101fa8556c6f6b7d8f3bc30af3bd90b3601285 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 14 Oct 2026 11:11:21 +0900
+Subject: [PATCH 47/49] mediacodec: start a deferred MPEG-2 output at a
+ sequence header
+
+An MPEG-2 output without a declared aspect is opened, and MediaCodec
+started, with the first block, to take the aspect of its sequence
+header. A decoder that starts in the middle of a group of pictures, as
+after a seek FFmpeg's GXF demuxer lands there, got a first block without
+one: the output opened square and stayed so, and the pictures before the
+next intra picture referred to ones the codec never had. The extra
+data's sequence header now states the aspect when there is one; without
+it, a deferred start waits for a block with a sequence header, or an
+intra picture, dropping the blocks before it.
+---
+ modules/codec/omxil/mediacodec.c | 79 ++++++++++++++++++++++++--------
+ 1 file changed, 61 insertions(+), 18 deletions(-)
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 24494aa..7d89566 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -454,6 +454,32 @@ static int ParseExtra(decoder_t *p_dec)
+         return VLC_SUCCESS;
+ }
+ 
++/* DAR aspect ratio from the DVD MPEG2 standard */
++static const int mpeg2_aspect[16][2] =
++{
++    {0,0}, /* reserved */
++    {0,0}, /* DAR = 0:0 will result in SAR = 1:1 */
++    {4,3}, {16,9}, {221,100},
++    /* reserved */
++    {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
++    {0,0}, {0,0}
++};
++
++/* Whether [p, p + i_size) holds an MPEG-1/2 sequence header, and the display
++ * aspect it states in *pi_num:*pi_den, 0:0 for square samples. */
++static bool MPEG2_GetDar(const uint8_t *p, size_t i_size, int *pi_num, int *pi_den)
++{
++    for (size_t i = 0; i + 7 < i_size; i++)
++    {
++        if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != 1 || p[i + 3] != 0xB3)
++            continue;
++        *pi_num = mpeg2_aspect[p[i + 7] >> 4][0];
++        *pi_den = mpeg2_aspect[p[i + 7] >> 4][1];
++        return true;
++    }
++    return false;
++}
++
+ static int UpdateVout(decoder_t *p_dec)
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -847,13 +873,17 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+     /* A Vout learns a new aspect from the pictures it displays, after it has
+      * displayed them; only the aspect it is opened with reaches the window
+      * before the first picture. An MPEG-2 sequence states its aspect only in
+-     * its sequence header, which the packetizer leaves undeclared and which
+-     * arrives with the first block: open the output, and start MediaCodec
+-     * that renders into it, once that block is parsed (DecodeBlock). */
++     * its sequence header, which the packetizer leaves undeclared: taken from
++     * the extra data when it holds one, otherwise from the block that brings
++     * one, the output is opened, and MediaCodec that renders into it started,
++     * once that block is parsed (DecodeBlock). */
+     if (p_dec->fmt_out.i_codec == VLC_CODEC_ANDROID_OPAQUE
+      && (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
+       || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V)
+-     && (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den))
++     && (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den)
++     && !MPEG2_GetDar(p_dec->fmt_in.p_extra, p_dec->fmt_in.i_extra,
++                      &p_sys->video.i_mpeg_dar_num,
++                      &p_sys->video.i_mpeg_dar_den))
+     {
+         p_sys->b_start_on_first_block = true;
+     }
+@@ -1767,6 +1797,30 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
++    /* A deferred MPEG-2 start waits for a block MediaCodec can begin decoding
++     * with: one with a sequence header, which states the aspect, or an intra
++     * picture. A decoder that starts in the middle of a group of pictures, as
++     * after a seek a demuxer lands there, gets pictures that refer to ones it
++     * never had, and would open its output without the aspect; they are
++     * dropped until then. */
++    if (p_sys->b_start_on_first_block
++     && (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
++      || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V))
++    {
++        int i_dar_num, i_dar_den;
++        if (MPEG2_GetDar(p_in_block->p_buffer, p_in_block->i_buffer,
++                         &i_dar_num, &i_dar_den))
++        {
++            p_sys->video.i_mpeg_dar_num = i_dar_num;
++            p_sys->video.i_mpeg_dar_den = i_dar_den;
++        }
++        else if (!(p_in_block->i_flags & BLOCK_FLAG_TYPE_I))
++        {
++            msg_Dbg(p_dec, "waiting for a sequence header to start");
++            goto end;
++        }
++    }
++
+     /* An H.263 decoder is chosen by MIME type alone, and a codec stating
+      * only the profiles of the first H.263 version can fail on a picture with
+      * the extended picture type of version 2 after consuming input
+@@ -1832,9 +1886,9 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
+-    /* The first block of a deferred MPEG-2 start has been parsed: it states
+-     * the aspect when it carries the sequence header, as the first block of
+-     * a sequence does; otherwise the output starts as it would have. */
++    /* The first block a deferred MPEG-2 start can begin with has been parsed:
++     * it states the aspect when it carries the sequence header; an intra
++     * picture without one starts the output as it would have. */
+     if (p_sys->b_start_on_first_block)
+     {
+         p_sys->b_start_on_first_block = false;
+@@ -1936,17 +1990,6 @@ static int VideoMPEG2_OnNewBlock(decoder_t *p_dec, block_t **pp_block)
+     decoder_sys_t *p_sys = p_dec->p_sys;
+     const int startcode = (*pp_block)->p_buffer[3];
+ 
+-    /* DAR aspect ratio from the DVD MPEG2 standard */
+-    static const int mpeg2_aspect[16][2] =
+-    {
+-        {0,0}, /* reserved */
+-        {0,0}, /* DAR = 0:0 will result in SAR = 1:1 */
+-        {4,3}, {16,9}, {221,100},
+-        /* reserved */
+-        {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
+-        {0,0}, {0,0}
+-    };
+-
+     if (startcode == 0xB3 /* SEQUENCE_HEADER_STARTCODE */)
+     {
+         int mpeg_dar_code = (*pp_block)->p_buffer[7] >> 4;
+-- 
+2.55.0
+

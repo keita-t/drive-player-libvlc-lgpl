@@ -1,0 +1,43 @@
+From 996c72f13681a3f2813e6c7c06e2f8c7c603669c Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 07:37:20 +0900
+Subject: [PATCH] avformat: time the first packet of a format that carries no
+ time
+
+FFmpeg times no packet of a format that carries no time, as raw Shorten.
+The audio decoder times the sound it makes from the packets, and waits
+for a first time to start from: it dropped all of such a file, which
+played to its end at once without a sound.
+
+Time the first packet of a track where the demuxer stands, at its start
+unless a seek moved it, and set the clock there. The decoder times the
+rest of the sound from it.
+---
+ modules/demux/avformat/demux.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 98ce79b..38e8245 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -1001,6 +1001,17 @@ static int Demux( demux_t *p_demux )
+             p_stream->time_base.num /
+             p_stream->time_base.den;
+ 
++    /* A format that carries no time (raw Shorten) times none of its packets,
++     * and a decoder that times its sound from the packets waits for a time to
++     * start from, dropping all it is given. Time a track's first packet where
++     * the demuxer stands, at its start unless a seek moved it: the decoder
++     * times the rest from it. */
++    if( ( p_sys->fmt->flags & AVFMT_NOTIMESTAMPS ) &&
++        p_track->i_pcr <= VLC_TICK_INVALID &&
++        p_frame->i_dts <= VLC_TICK_INVALID && p_frame->i_pts <= VLC_TICK_INVALID )
++        p_frame->i_dts = p_frame->i_pts =
++            p_sys->i_pcr > VLC_TICK_INVALID ? p_sys->i_pcr : VLC_TICK_0;
++
+     /* Add here notoriously bugged file formats/samples */
+     if( !strcmp( p_sys->fmt->name, "flv" ) )
+     {
+-- 
+2.55.0
+

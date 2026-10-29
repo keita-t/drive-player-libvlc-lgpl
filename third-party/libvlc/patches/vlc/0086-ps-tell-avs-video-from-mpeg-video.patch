@@ -1,0 +1,67 @@
+From c9946dd7a7254b5eaf07abb639fa6bdd058b4ba8 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:34:59 +0900
+Subject: [PATCH] ps: tell AVS video from MPEG video
+
+A program stream without a stream map gives a video stream no type, and
+the demuxer took it for MPEG video: AVS video (CAVS) was handed to the
+MPEG-2 decoder, which made nothing of it, and no picture was shown. A
+stream map typing it as AVS video (0x42) was not read either.
+
+Take the type from the stream map, and without one, tell AVS video by
+the sequence header it starts with, whose start code MPEG video leaves
+reserved, as FFmpeg's demuxer probes it.
+---
+ modules/demux/mpeg/ps.h | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/modules/demux/mpeg/ps.h b/modules/demux/mpeg/ps.h
+index 623fdb9..2725c9b 100644
+--- a/modules/demux/mpeg/ps.h
++++ b/modules/demux/mpeg/ps.h
+@@ -99,6 +99,14 @@ static inline void ps_track_init( ps_track_t tk[PS_TK_COUNT] )
+     }
+ }
+ 
++/* Whether a video stream's data starts with the sequence header of AVS video
++ * (CAVS), whose start code MPEG video leaves reserved. */
++static inline bool ps_is_CAVS( const uint8_t *p_data, size_t i_data )
++{
++    return i_data >= 4 && p_data[0] == 0 && p_data[1] == 0 &&
++           p_data[2] == 1 && p_data[3] == 0xb0;
++}
++
+ static inline bool ps_is_H264( const uint8_t *p_data, size_t i_data )
+ {
+     const uint8_t startcode[3] = { 0, 0, 1 };
+@@ -268,6 +276,10 @@ static inline int ps_track_fill( ps_track_t *tk, ps_psm_t *p_psm,
+             {
+                 es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_HEVC );
+             }
++            else if( i_type == 0x42 )
++            {
++                es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_CAVS );
++            }
+             else if( i_id == 0xe2 || /* Primary H.264 in evob */
+                      i_id == 0xe3 )  /* Secondary H.264 in evob */
+             {
+@@ -281,6 +293,16 @@ static inline int ps_track_fill( ps_track_t *tk, ps_psm_t *p_psm,
+             {
+                 es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_H264 );
+             }
++            /* With no stream map to type it, AVS video is told from MPEG
++             * video by its sequence header, as FFmpeg's demuxer probes it. */
++            else if( p_pkt && i_type == 0x00 && /* Not from PSM */
++                     p_pkt->i_buffer > 9 &&
++                     p_pkt->i_buffer > 9U + p_pkt->p_buffer[8] &&
++                     ps_is_CAVS( &p_pkt->p_buffer[ 9 + p_pkt->p_buffer[8] ],
++                                 p_pkt->i_buffer - 9 - p_pkt->p_buffer[8] ) )
++            {
++                es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_CAVS );
++            }
+             else if( tk->fmt.i_cat == UNKNOWN_ES &&
+                      ( p_pkt != NULL /* Not system */ || b_mpeg2only ) )
+             {
+-- 
+2.55.0
+

@@ -1,0 +1,39 @@
+From 5ef10aaa06f596266aa53b0a9b68a6706691ebf4 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 07:36:35 +0900
+Subject: [PATCH] mp4: read the packets of a QDM2 track one by one
+
+A QuickTime sound description of version 1 states how many samples a
+packet of compressed sound holds and how many bytes it takes. The
+demuxer read a chunk of QDM2 whole, as one block timed at its first
+packet: a file whose one chunk holds all of its seconds was handed over
+at once, and the time of the input stayed at the start of it while the
+sound played to its end.
+
+Read a QDM2 track packet by packet, by the bytes its description states
+for one, as FFmpeg's demuxer does. A packet is then timed by its own
+samples, and the position in a chunk is found by its packets.
+---
+ modules/demux/mp4/essetup.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/demux/mp4/essetup.c b/modules/demux/mp4/essetup.c
+index 5f23b34..e1bd08a 100644
+--- a/modules/demux/mp4/essetup.c
++++ b/modules/demux/mp4/essetup.c
+@@ -1292,6 +1292,12 @@ int SetupAudioES( demux_t *p_demux, mp4_track_t *p_track, MP4_Box_t *p_sample )
+                 p_track->fmt.audio.i_channels = *((uint8_t*)p_track->fmt.p_extra + 41);
+                 p_track->fmt.audio.i_rate = GetDWBE((uint8_t*)p_track->fmt.p_extra + 52);
+             }
++            /* A chunk of QDM2 holds the packets of seconds of sound, which
++             * one block would hand over at the time of the first: read them
++             * one by one, by the size the description states for each. */
++            if( p_sample->i_type == VLC_CODEC_QDM2 )
++                p_track->fmt.audio.i_blockalign =
++                    p_sample->data.p_sample_soun->i_bytes_per_frame;
+             break;
+         }
+         case VLC_CODEC_ADPCM_MS:
+-- 
+2.55.0
+

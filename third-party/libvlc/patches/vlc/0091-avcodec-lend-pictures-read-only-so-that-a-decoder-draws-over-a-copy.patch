@@ -1,0 +1,47 @@
+From c3f527541da470dc6128eb992fa786ac59d837ee Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 13:43:55 +0900
+Subject: [PATCH] avcodec: lend pictures read-only so that a decoder draws over
+ a copy
+
+A decoder that draws each frame over its last (FlashSV, QuickTime RLE,
+RPZA, Microsoft RLE and Video 1, FLIC and others) takes its last frame
+again for the next one, and draws in place when FFmpeg finds its buffer
+writable. With direct rendering, that buffer is a picture lent to the
+decoder, and the picture the decoder output, a clone sharing its planes,
+waits in the video output to be shown. No reference of FFmpeg's but the
+decoder's held the buffer, so FFmpeg found it writable and the next
+frames were drawn over the picture waiting. A picture then showed the
+last frame decoded, as far ahead as the decoding runs ahead of the
+display, not its own: after a seek, an input showed frames ahead of its
+time.
+
+Lend the picture's planes read-only. Such a decoder then takes a new
+picture and copies its last frame into it before drawing, as a frame is
+copied out without direct rendering; the other decoders take a new
+buffer for each frame and do not ask whether it is writable.
+---
+ modules/codec/avcodec/video.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index f6925b9..0d97854 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -1689,8 +1689,12 @@ static int lavc_dr_GetFrame(struct AVCodecContext *ctx, AVFrame *frame,
+ 
+         frame->data[i] = data;
+         frame->linesize[i] = pic->p[i].i_pitch;
++        /* The picture goes out as soon as it is decoded, while the decoder may
++         * keep it as its last frame. One that draws each frame over its last
++         * (FlashSV, QuickTime RLE, Microsoft RLE...) would draw over a picture
++         * waiting to be shown: lent read-only, it draws over a copy. */
+         frame->buf[i] = av_buffer_create(data, size, lavc_ReleaseFrame,
+-                                         pic, 0);
++                                         pic, AV_BUFFER_FLAG_READONLY);
+         if (unlikely(frame->buf[i] == NULL))
+         {
+             while (i > 0)
+-- 
+2.55.0
+

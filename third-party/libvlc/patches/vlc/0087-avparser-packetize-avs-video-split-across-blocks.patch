@@ -1,0 +1,85 @@
+From 2b9d33d9752d6f9550339af70d3d585648309f9a Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:37:26 +0900
+Subject: [PATCH] avparser: packetize AVS video split across blocks
+
+The packetizer of FFmpeg's parsers served VP9 alone, whose blocks hold
+whole frames. AVS video (CAVS) in a program stream comes in packets that
+end anywhere in a picture, and went to the decoder as they came, which
+decodes whole pictures only: none was shown.
+
+Serve AVS video too, and packetize frames put together across blocks:
+hand a block over as it is only when the parser's frame is the block
+itself, copying any other; time a copied frame by the block it started
+in, which the parser keeps for it, as the block now parsed may hold the
+next frame's; and stop at the end of a block's data rather than parse
+nothing, which tells the parser the stream ended and has it hand over a
+picture before it is whole. A block with no time is given to the parser
+as having none.
+---
+ modules/packetizer/avparser.c | 26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/modules/packetizer/avparser.c b/modules/packetizer/avparser.c
+index 826ec2e..334b104 100644
+--- a/modules/packetizer/avparser.c
++++ b/modules/packetizer/avparser.c
+@@ -91,8 +91,10 @@ int avparser_OpenPacketizer( vlc_object_t *p_this )
+     if( p_dec->fmt_in.i_cat != VIDEO_ES )
+         return VLC_EGENERIC;
+ 
+-    /* Restrict to VP9 for now */
+-    if( p_dec->fmt_in.i_codec != VLC_CODEC_VP9 )
++    /* Restrict to VP9 for now, and to AVS video, which a program stream
++     * splits into packets that end anywhere in a picture */
++    if( p_dec->fmt_in.i_codec != VLC_CODEC_VP9 &&
++        p_dec->fmt_in.i_codec != VLC_CODEC_CAVS )
+         return VLC_EGENERIC;
+ 
+     unsigned i_avcodec_id;
+@@ -177,18 +179,24 @@ static block_t *Packetize ( decoder_t *p_dec, block_t **pp_block )
+     uint8_t * p_outdata;
+     int i_outlen;
+ 
+-    if( p_sys->i_offset == i_inlen )
++    /* All of it parsed: parsing nothing would tell the parser the stream
++     * ended, and have it hand over a picture it holds before it is whole. */
++    if( (size_t)p_sys->i_offset == p_block->i_buffer )
+         goto out;
+ 
+     p_sys->i_offset += av_parser_parse2( p_sys->p_parser_ctx, p_sys->p_codec_ctx,
+                                          &p_outdata, &i_outlen, p_indata, i_inlen,
+-                                         p_block->i_pts, p_block->i_dts, -1);
++                                         p_block->i_pts > VLC_TICK_INVALID ? p_block->i_pts : AV_NOPTS_VALUE,
++                                         p_block->i_dts > VLC_TICK_INVALID ? p_block->i_dts : AV_NOPTS_VALUE,
++                                         -1);
+ 
+     if( unlikely( i_outlen <= 0 || !p_outdata ) )
+         goto out;
+ 
+     block_t * p_ret;
+-    if( (size_t)i_outlen < p_block->i_buffer )
++    /* A frame the parser made of the block itself is the block: one it
++     * cut out of it, or put together from blocks before, is copied. */
++    if( p_outdata != p_block->p_buffer || (size_t)i_outlen != p_block->i_buffer )
+     {
+         p_ret = block_Alloc( i_outlen );
+         if( unlikely ( !p_ret ) )
+@@ -207,8 +215,12 @@ static block_t *Packetize ( decoder_t *p_dec, block_t **pp_block )
+             p_block->i_flags &= ~BLOCK_FLAG_DISCONTINUITY;
+ 
+         memcpy( p_ret->p_buffer, p_outdata, i_outlen );
+-        p_ret->i_pts = p_block->i_pts;
+-        p_ret->i_dts = p_block->i_dts;
++        /* The times of the block the frame started in, which the parser
++         * keeps for it: the block now parsed may hold the next frame's. */
++        p_ret->i_pts = p_sys->p_parser_ctx->pts != AV_NOPTS_VALUE ?
++                       p_sys->p_parser_ctx->pts : VLC_TICK_INVALID;
++        p_ret->i_dts = p_sys->p_parser_ctx->dts != AV_NOPTS_VALUE ?
++                       p_sys->p_parser_ctx->dts : VLC_TICK_INVALID;
+         p_block->i_pts = p_block->i_dts = VLC_TICK_INVALID;
+     }
+     else /* as-is block is now used */
+-- 
+2.55.0
+

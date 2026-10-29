@@ -1,0 +1,117 @@
+From c6da5d40b1c7183fbe60ece24b87a488cf5612fd Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 18 Oct 2026 13:55:11 +0900
+Subject: [PATCH 62/63] ps: find a precise seek's lead by the video's own
+ timestamps
+
+A precise seek lands a second before the time, so that the pictures are
+decoded from the key picture before it, and searches for that position by
+the timestamps of the time track, the longest one. A muxer writes the
+packets of one stream ahead of another's of the same time: where the video
+takes few bytes beside LPCM sound, as in a VOB of still pictures, its
+packets were a second ahead of the sound's, the lead found by the sound
+left the video at the time itself, past its key picture, and a decoder that
+waits for one (MediaCodec) showed nothing until the next.
+
+Search a precise seek's position by the timestamps of the first video
+track, the time track otherwise, within the bounds of the time track's
+probed length: a video of few packets may have none near the ends the
+length is probed at. Other seeks are unchanged.
+---
+ modules/demux/mpeg/ps.c | 51 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 38 insertions(+), 13 deletions(-)
+
+diff --git a/modules/demux/mpeg/ps.c b/modules/demux/mpeg/ps.c
+index c254b2d..df77f3c 100644
+--- a/modules/demux/mpeg/ps.c
++++ b/modules/demux/mpeg/ps.c
+@@ -731,12 +731,12 @@ static int Demux( demux_t *p_demux )
+ #define PS_SEEK_PROBE_PACKETS 256
+ #define PS_SEEK_MIN_RANGE 2048
+ 
+-/* The first timestamp of the time track from byte i_pos on, and where its
+- * packet starts; nothing is sent. VLC_TICK_INVALID when none is found. */
+-static vlc_tick_t ReadTimeAt( demux_t *p_demux, uint64_t i_pos, uint64_t *pi_pkt_pos )
++/* The first timestamp of track tk from byte i_pos on, and where its packet
++ * starts; nothing is sent. VLC_TICK_INVALID when none is found. */
++static vlc_tick_t ReadTimeAt( demux_t *p_demux, const ps_track_t *tk,
++                              uint64_t i_pos, uint64_t *pi_pkt_pos )
+ {
+     demux_sys_t *p_sys = p_demux->p_sys;
+-    ps_track_t *tk = &p_sys->tk[p_sys->i_time_track_index];
+ 
+     if( vlc_stream_Seek( p_demux->s, i_pos ) != VLC_SUCCESS )
+         return VLC_TICK_INVALID;
+@@ -772,18 +772,34 @@ static vlc_tick_t ReadTimeAt( demux_t *p_demux, uint64_t i_pos, uint64_t *pi_pkt
+     return VLC_TICK_INVALID;
+ }
+ 
+-/* Move to the packet of the time track whose timestamp is at most i_time, and
+- * at most PS_SEEK_TOLERANCE before it. The bytes of a program stream are not
++/* The track a precise seek is found by: the first video track, as the time
++ * track otherwise. */
++static const ps_track_t *SeekTrack( const demux_sys_t *p_sys )
++{
++    for( int i = 0; i < PS_TK_COUNT; i++ )
++    {
++        const ps_track_t *tk = &p_sys->tk[i];
++        if( tk->b_configured && tk->es && tk->fmt.i_cat == VIDEO_ES )
++            return tk;
++    }
++    return &p_sys->tk[p_sys->i_time_track_index];
++}
++
++/* Move to the packet of track tk whose timestamp is at most i_time, and at
++ * most PS_SEEK_TOLERANCE before it. The bytes of a program stream are not
+  * spread evenly over its time, so the position is searched for by the
+- * timestamps read at the positions the ones known so far point to. */
+-static int SeekToTime( demux_t *p_demux, vlc_tick_t i_time )
++ * timestamps read at the positions the ones known so far point to. Those of
++ * the time track, whose length was probed, bound the search at first: a
++ * track of few packets, as a video beside LPCM sound, may have none near the
++ * ends the length is probed at. All tracks share one clock. */
++static int SeekToTime( demux_t *p_demux, const ps_track_t *tk, vlc_tick_t i_time )
+ {
+     demux_sys_t *p_sys = p_demux->p_sys;
+-    const ps_track_t *tk = &p_sys->tk[p_sys->i_time_track_index];
++    const ps_track_t *p_time_tk = &p_sys->tk[p_sys->i_time_track_index];
+     const uint64_t i_size = stream_Size( p_demux->s );
+ 
+     uint64_t i_low = p_sys->i_start_byte, i_high = i_size;
+-    vlc_tick_t i_low_time = tk->i_first_pts, i_high_time = tk->i_last_pts;
++    vlc_tick_t i_low_time = p_time_tk->i_first_pts, i_high_time = p_time_tk->i_last_pts;
+     uint64_t i_found = i_low;
+ 
+     if( i_size <= i_low || i_high_time <= i_low_time )
+@@ -801,7 +817,7 @@ static int SeekToTime( demux_t *p_demux, vlc_tick_t i_time )
+         uint64_t i_pos = i_low + (uint64_t)( i_range * f );
+ 
+         uint64_t i_pkt_pos;
+-        vlc_tick_t i_pts = ReadTimeAt( p_demux, i_pos, &i_pkt_pos );
++        vlc_tick_t i_pts = ReadTimeAt( p_demux, tk, i_pos, &i_pkt_pos );
+         if( i_pts == VLC_TICK_INVALID || i_pts > i_time || i_pkt_pos >= i_high )
+         {
+             i_high = i_pos;
+@@ -926,8 +942,17 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+                  * time track's first timestamp. */
+                 const vlc_tick_t i_time = p_sys->tk[p_sys->i_time_track_index].i_first_pts + i64;
+                 /* A precise seek lands before the key picture preceding the
+-                 * time, decodes from there, and shows from the time. */
+-                if( SeekToTime( p_demux, b_precise ? i_time - PS_SEEK_LEAD : i_time ) )
++                 * time, decodes from there, and shows from the time. It is
++                 * the pictures' lead, so it is found by the video's own
++                 * timestamps: the muxer writes the packets of one stream
++                 * ahead of another's of the same time, by as much as a second
++                 * where the video takes few bytes beside LPCM sound, which
++                 * would leave the time track's lead short of the key
++                 * picture. */
++                const ps_track_t *p_seek_tk = &p_sys->tk[p_sys->i_time_track_index];
++                if( b_precise )
++                    p_seek_tk = SeekTrack( p_sys );
++                if( SeekToTime( p_demux, p_seek_tk, b_precise ? i_time - PS_SEEK_LEAD : i_time ) )
+                     break;
+                 p_sys->i_current_pts = 0;
+                 p_sys->i_scr = -1;
+-- 
+2.55.0
+
