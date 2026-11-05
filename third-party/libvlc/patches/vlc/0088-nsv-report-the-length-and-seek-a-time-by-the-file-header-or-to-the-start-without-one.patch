@@ -1,0 +1,217 @@
+From ef8c7863ba06d6d38c90b0e0c6aaf03090846308 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 21 Oct 2026 08:52:27 +0900
+Subject: [PATCH] nsv: report the length and seek a time by the file header, or
+ to the start without one
+
+An NSV stream's frames are timed from where the demuxer starts reading,
+and its demuxer refused every time seek. A player starting it over from
+its start by time, as one does when a window comes, had its decoders
+flushed while the stream went on from where it was read: the second or so
+read ahead was lost, and the sound and the clock started that far in. The
+file header (NSVf) states the file's length and a table of contents of
+where its sync frames start, and the demuxer skipped it: an NSV file had
+no length and could not be sought.
+
+Read the length and the table when the file starts with the header, report
+the length, and seek a time to the last sync frame at or before it, its
+time the frame the table gives it (TOC2) or its even share of the length.
+A precise seek shows from the time. A stream without the header is sought
+to its start only, where its first frame or the file header before it is.
+The frames are timed again from where the seek lands, as the demuxers of
+the elementary video streams time theirs.
+---
+ modules/demux/nsv.c | 130 ++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 120 insertions(+), 10 deletions(-)
+
+diff --git a/modules/demux/nsv.c b/modules/demux/nsv.c
+index ae8b9e3..2c881bb 100644
+--- a/modules/demux/nsv.c
++++ b/modules/demux/nsv.c
+@@ -72,6 +72,16 @@ struct demux_sys_t
+     int64_t     i_pcr;
+     int64_t     i_time;
+     int64_t     i_pcr_inc;
++    /* Where its first frame, or the file header before it, starts. */
++    uint64_t    i_start;
++
++    /* What the file header states: the length (-1 when it states none), and
++     * where each sync frame of its table of contents starts, with the frame
++     * it starts at where the table times them (TOC2). */
++    int64_t     i_length;
++    uint32_t    i_toc;
++    uint64_t    *pi_toc_offset;
++    uint32_t    *pi_toc_frame;
+ 
+     bool b_start_record;
+ };
+@@ -83,6 +93,8 @@ static int ReSynch( demux_t *p_demux );
+ 
+ static int ReadNSVf( demux_t *p_demux );
+ static int ReadNSVs( demux_t *p_demux );
++static void ReadFileHeader( demux_t *p_demux );
++static int64_t TocTime( demux_sys_t *p_sys, uint32_t i );
+ 
+ /*****************************************************************************
+  * Open
+@@ -125,9 +137,16 @@ static int Open( vlc_object_t *p_this )
+     p_sys->i_pcr   = 0;
+     p_sys->i_time  = 0;
+     p_sys->i_pcr_inc = 0;
++    p_sys->i_start = vlc_stream_Tell( p_demux->s );
++    p_sys->i_length = -1;
++    p_sys->i_toc = 0;
++    p_sys->pi_toc_offset = NULL;
++    p_sys->pi_toc_frame = NULL;
+ 
+     p_sys->b_start_record = false;
+ 
++    ReadFileHeader( p_demux );
++
+     return VLC_SUCCESS;
+ }
+ 
+@@ -139,6 +158,8 @@ static void Close( vlc_object_t *p_this )
+     demux_t     *p_demux = (demux_t*)p_this;
+     demux_sys_t *p_sys = p_demux->p_sys;
+ 
++    free( p_sys->pi_toc_offset );
++    free( p_sys->pi_toc_frame );
+     free( p_sys );
+ }
+ 
+@@ -385,18 +406,13 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             *pi64 = p_sys->i_time;
+             return VLC_SUCCESS;
+ 
+-#if 0
+         case DEMUX_GET_LENGTH:
+-            pi64 = va_arg( args, int64_t * );
+-            if( p_sys->i_mux_rate > 0 )
+-            {
+-                *pi64 = (int64_t)1000000 * ( stream_Size( p_demux->s ) / 50 ) / p_sys->i_mux_rate;
+-                return VLC_SUCCESS;
+-            }
+-            *pi64 = 0;
+-            return VLC_EGENERIC;
++            /* The length the file header states: the frames do not say it. */
++            if( p_sys->i_length < 0 )
++                return VLC_EGENERIC;
++            *va_arg( args, int64_t * ) = p_sys->i_length;
++            return VLC_SUCCESS;
+ 
+-#endif
+         case DEMUX_GET_FPS:
+             pf = va_arg( args, double * );
+             *pf = (double)1000000.0 / (double)p_sys->i_pcr_inc;
+@@ -417,6 +433,40 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+ 
+         case DEMUX_SET_TIME:
++        {
++            /* Its frames carry no time to search: a time is found by the
++             * table of contents, at the last sync frame before it, and
++             * without one, the start is the one time a frame can be found
++             * at. The frames are timed from where it lands. */
++            int64_t i_target = va_arg( args, int64_t );
++            bool b_precise = va_arg( args, int );
++            uint64_t i_offset = p_sys->i_start;
++            int64_t i_landed = 0;
++            if( i_target != 0 )
++            {
++                if( p_sys->i_toc == 0 )
++                    return VLC_EGENERIC;
++                for( uint32_t i = 0; i < p_sys->i_toc; i++ )
++                {
++                    int64_t i_entry = TocTime( p_sys, i );
++                    if( i_entry > i_target )
++                        break;
++                    i_offset = p_sys->pi_toc_offset[i];
++                    i_landed = i_entry;
++                }
++            }
++            if( vlc_stream_Seek( p_demux->s, i_offset ) )
++                return VLC_EGENERIC;
++            p_sys->i_pcr = i_landed;
++            p_sys->i_time = i_landed;
++            /* A precise seek decodes from the sync frame and shows from the
++             * time: the frames before it are dropped. */
++            if( b_precise && i_target > i_landed )
++                es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME,
++                                VLC_TICK_0 + i_target );
++            return VLC_SUCCESS;
++        }
++
+         default:
+             return VLC_EGENERIC;
+     }
+@@ -456,6 +506,66 @@ static int ReSynch( demux_t *p_demux )
+     return VLC_EGENERIC;
+ }
+ 
++/*****************************************************************************
++ * ReadFileHeader: the length and table of contents of a file header
++ *****************************************************************************
++ * The header: "NSVf", its size, the file's size, its length in milliseconds
++ * (all ones when unknown), the size of its metadata, the entries allocated to
++ * the table and those used, the metadata, then the table: each used entry the
++ * offset of a sync frame from the header's end, followed, where more entries
++ * were allocated and "TOC2" follows, by the frame each starts at.
++ *****************************************************************************/
++static void ReadFileHeader( demux_t *p_demux )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    const uint8_t *p;
++
++    if( vlc_stream_Peek( p_demux->s, &p, 28 ) < 28 || memcmp( p, "NSVf", 4 ) )
++        return;
++    const uint32_t i_size = GetDWLE( &p[4] );
++    if( i_size < 28 || i_size > (1 << 22) ||
++        vlc_stream_Peek( p_demux->s, &p, i_size ) < (ssize_t)i_size )
++        return;
++    const uint32_t i_length_ms = GetDWLE( &p[12] );
++    const uint32_t i_strings = GetDWLE( &p[16] );
++    const uint32_t i_entries = GetDWLE( &p[20] );
++    const uint32_t i_used = GetDWLE( &p[24] );
++    if( i_length_ms != UINT32_MAX && i_length_ms > 0 )
++        p_sys->i_length = (int64_t)i_length_ms * 1000;
++    if( i_used == 0 || i_strings > i_size ||
++        (uint64_t)28 + i_strings + 4 * (uint64_t)i_used > i_size )
++        return;
++    const uint8_t *p_table = &p[28 + i_strings];
++    p_sys->pi_toc_offset = vlc_alloc( i_used, sizeof( *p_sys->pi_toc_offset ) );
++    if( p_sys->pi_toc_offset == NULL )
++        return;
++    for( uint32_t i = 0; i < i_used; i++ )
++        p_sys->pi_toc_offset[i] = p_sys->i_start + i_size + GetDWLE( &p_table[4 * i] );
++    p_sys->i_toc = i_used;
++    const uint8_t *p_toc2 = &p_table[4 * i_used];
++    if( i_entries > i_used &&
++        (uint64_t)( p_toc2 - p ) + 4 + 4 * (uint64_t)i_used <= i_size &&
++        !memcmp( p_toc2, "TOC2", 4 ) )
++    {
++        p_sys->pi_toc_frame = vlc_alloc( i_used, sizeof( *p_sys->pi_toc_frame ) );
++        if( p_sys->pi_toc_frame != NULL )
++            for( uint32_t i = 0; i < i_used; i++ )
++                p_sys->pi_toc_frame[i] = GetDWLE( &p_toc2[4 + 4 * i] );
++    }
++}
++
++/* The time the table's entry [i] starts at: its frame at the frame rate where
++ * the table times it, or else its share of the length, as the entries are
++ * spread evenly over it. */
++static int64_t TocTime( demux_sys_t *p_sys, uint32_t i )
++{
++    if( p_sys->pi_toc_frame != NULL && p_sys->i_pcr_inc > 0 )
++        return (int64_t)p_sys->pi_toc_frame[i] * p_sys->i_pcr_inc;
++    if( p_sys->i_length > 0 )
++        return p_sys->i_length * i / p_sys->i_toc;
++    return 0;
++}
++
+ /*****************************************************************************
+  * ReadNSVf:
+  *****************************************************************************/
+-- 
+2.56.0
+

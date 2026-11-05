@@ -1,4 +1,4 @@
-From 518973f5cc5d0053bcfeeabd62ee3b8eba686649 Mon Sep 17 00:00:00 2001
+From 0e4e21a106d2cedf46c71b73541f7d9005dbb329 Mon Sep 17 00:00:00 2001
 From: Drive Player <drive-player@localhost>
 Date: Mon, 12 Oct 2026 18:01:06 +0900
 Subject: [PATCH] decoder: cancel a pending drain when flushing
@@ -11,15 +11,61 @@ back from near the end showed no picture and played no sound.
 
 A flush discards the data the drain was for: clear the request with it. The
 input asks again at the end of the next timeline.
+
+The flush can come while the decoder drains, and the input can ask for the
+next drain before the drain returns: a file read in a few packets, as a
+Monkey's Audio file of two 4.6 s packets is, reaches its end again at once
+after a seek near its end. The returning drain took that request for its
+own and answered it before the decoder had decoded anything of the new
+position, and the input, finding the decoder drained as soon as its FIFO
+ran empty, ended about a second and a half after the seek. A drain answers
+its request only when no flush was asked for since it began; a request
+seen then is left for the decoder to answer at the end of the next
+timeline.
 ---
- src/input/decoder.c | 7 +++++++
- 1 file changed, 7 insertions(+)
+ src/input/decoder.c | 29 +++++++++++++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
 
 diff --git a/src/input/decoder.c b/src/input/decoder.c
-index 302051d..78f6890 100644
+index 302051d..7b4ff2f 100644
 --- a/src/input/decoder.c
 +++ b/src/input/decoder.c
-@@ -2226,6 +2226,13 @@ void input_DecoderFlush( decoder_t *p_dec )
+@@ -1725,14 +1725,32 @@ static void *DecoderThread( void *p_data )
+ 
+         /* TODO? Wait for draining instead of polling. */
+         vlc_mutex_lock( &p_owner->lock );
+-        if( p_owner->b_draining && (p_block == NULL) )
++        vlc_fifo_Lock( p_owner->p_fifo );
++        /* A flush asked for since this drain began, pending until the top of
++         * the loop, cancelled the request this drain answers
++         * (input_DecoderFlush): a request seen now is the next timeline's,
++         * which the input makes once it has reached its end again, at once
++         * after a seek near the end of a file read in a few packets. Taken
++         * for this drain's, it was answered before the decoder had decoded
++         * that timeline, and the input, finding the decoder drained as soon
++         * as its FIFO ran empty, ended with most of the timeline yet to
++         * play. It is left for the decoder to answer at the end of that
++         * timeline. */
++        const bool b_next_drain = p_owner->b_draining && (p_block == NULL)
++                               && p_owner->flushing;
++        if( p_owner->b_draining && (p_block == NULL) && !p_owner->flushing )
+         {
+             p_owner->b_draining = false;
+             p_owner->drained = true;
+         }
+-        vlc_fifo_Lock( p_owner->p_fifo );
+         vlc_cond_signal( &p_owner->wait_acknowledge );
+         vlc_mutex_unlock( &p_owner->lock );
++        if( unlikely(b_next_drain) )
++        {
++            vlc_fifo_Unlock( p_owner->p_fifo );
++            msg_Dbg( p_dec, "drain asked for after a flush left for the next timeline" );
++            vlc_fifo_Lock( p_owner->p_fifo );
++        }
+     }
+     vlc_cleanup_pop();
+     vlc_assert_unreachable();
+@@ -2226,6 +2244,13 @@ void input_DecoderFlush( decoder_t *p_dec )
       * a row. */
      p_owner->flushing = true;
  
@@ -34,5 +80,5 @@ index 302051d..78f6890 100644
       * to display one frame/subtitle */
      if( p_owner->paused
 -- 
-2.55.0
+2.56.0
 

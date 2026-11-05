@@ -10,7 +10,7 @@ sources, patches and build scripts that produced that build. Two builds matter:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-35 | `libvlc-lgpl-3.7.6-35` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-37 | `libvlc-lgpl-3.7.6-37` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
 | 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | `variants` | A build for comparison, which the app does not ship: libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without. The built library is attached to the GitHub release of its tag |
 
 ## Contents
@@ -47,7 +47,7 @@ it carries source patches for behaviour the app relies on.
 
 ### Patches
 
-`patches/libvlcjni/` (4 patches) is applied to libvlcjni, and `patches/vlc/` (100 patches) to VLC after the patches
+`patches/libvlcjni/` (4 patches) is applied to libvlcjni, and `patches/vlc/` (107 patches) to VLC after the patches
 libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
 change it makes:
 
@@ -55,17 +55,17 @@ change it makes:
 |---|---|
 | [License](PATCHES.md#license) | 2 |
 | [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 3 |
-| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 11 |
+| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 13 |
 | [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 3 |
 | [Audio](PATCHES.md#audio) | 12 |
 | [Pause](PATCHES.md#pause) | 2 |
-| [Seeking](PATCHES.md#seeking) | 15 |
-| [Times and lengths](PATCHES.md#times-and-lengths) | 15 |
-| [Elementary video streams](PATCHES.md#elementary-video-streams) | 9 |
-| [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 10 |
-| [Video output](PATCHES.md#video-output) | 3 |
+| [Seeking](PATCHES.md#seeking) | 17 |
+| [Times and lengths](PATCHES.md#times-and-lengths) | 16 |
+| [Elementary video streams](PATCHES.md#elementary-video-streams) | 8 |
+| [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 11 |
+| [Video output](PATCHES.md#video-output) | 4 |
 | [Hardware decoders](PATCHES.md#hardware-decoders) | 5 |
-| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 9 |
+| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 10 |
 | [Ogg, with libVLC's own demuxer](PATCHES.md#ogg-with-libvlcs-own-demuxer) | 5 |
 
 ## Build

@@ -1,0 +1,35 @@
+From 4f1063033cbbda7584b43b04b031baa88cc3475d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 20:17:24 +0900
+Subject: [PATCH] nsv: have the h.264 packetizer read the stream's parameter
+ sets
+
+The video track was handed over as packetized, so no packetizer read an
+H.264 stream's parameter sets, which its frames carry in band: a decoder
+that does not parse them itself (MediaCodec in adaptive playback) never
+learnt the pixel aspect the SPS states, and an anamorphic stream showed
+square. Mark an H.264 track unpacketized, as the transport stream demuxer
+marks its own, so that the packetizer takes the aspect from the SPS.
+---
+ modules/demux/nsv.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/modules/demux/nsv.c b/modules/demux/nsv.c
+index 2c881bb..d8cfb35 100644
+--- a/modules/demux/nsv.c
++++ b/modules/demux/nsv.c
+@@ -635,6 +635,11 @@ static int ReadNSVs( demux_t *p_demux )
+     if( fcc != VLC_FOURCC( 'N', 'O', 'N', 'E' ) && fcc != p_sys->fmt_video.i_codec  )
+     {
+         es_format_Init( &p_sys->fmt_video, VIDEO_ES, fcc );
++        /* An H.264 frame is an access unit as the encoder wrote it, its
++         * parameter sets in it: the packetizer reads them, the pixel aspect
++         * among them, which the frame header does not state. */
++        if( fcc == VLC_FOURCC( 'H', '2', '6', '4' ) )
++            p_sys->fmt_video.b_packetized = false;
+         p_sys->fmt_video.video.i_width = GetWLE( &header[12] );
+         p_sys->fmt_video.video.i_height = GetWLE( &header[14] );
+         p_sys->fmt_video.video.i_visible_width = p_sys->fmt_video.video.i_width;
+-- 
+2.56.0
+

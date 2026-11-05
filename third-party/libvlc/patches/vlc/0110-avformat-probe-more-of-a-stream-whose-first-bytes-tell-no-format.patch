@@ -1,0 +1,63 @@
+From 8c73b7514d090fab0dd463023fc232fa81ca4b83 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 19:26:58 +0900
+Subject: [PATCH] avformat: probe more of a stream whose first bytes tell no
+ format
+
+The format was guessed from the first 2261 bytes only. FFmpeg knows a
+PVA file by two packet headers, and a file whose first packet is longer
+(an I picture filling a packet of up to 6 KiB, as in a file cut at a
+group of pictures) had one header in them: its probe was not sure, and
+the PS demuxer opened the file and played its sound alone. When the
+first bytes tell no format, look again at four times as many, up to
+64 KiB, as FFmpeg's own probe looks at more of a stream. A stream whose
+first bytes tell its format is probed as before.
+---
+ modules/demux/avformat/demux.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 5e119bd..08dc931 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -209,6 +209,11 @@ static void get_palette(es_format_t *fmt, const AVStream *s)
+  * of them unread: the AMV header is 88 bytes */
+ #define STATED_HEADER_SIZE 88
+ 
++/* The most of a stream looked at to tell its format when its first bytes do
++ * not: a format can be told only by a second unit, after a first of some
++ * kilobytes (a PVA packet is up to 6 KiB). */
++#define PROBE_SIZE_MAX (64 * 1024)
++
+ /* The length a file states where FFmpeg reads none, or AV_NOPTS_VALUE:
+  * - an AMV file, the AVI of portable players, to the second, in the last four
+  *   bytes of its amvh (the seconds, the minutes and the hours in 16 bits):
+@@ -344,6 +349,25 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+     if( fmt == NULL )
+         fmt = av_probe_input_format( &pd, 1 );
+ 
++    /* Some formats are only told apart by more than their first bytes: a
++     * PVA file is known by two packet headers, and its first packet can be
++     * 6 KiB long. As FFmpeg does when it probes, look again at more of the
++     * stream, a quarter of a probe's worth at a time, before giving up. */
++    for( int i_more = 4 * pd.buf_size; fmt == NULL && i_more <= PROBE_SIZE_MAX; i_more *= 4 )
++    {
++        const ssize_t i_peeked = vlc_stream_Peek( p_demux->s, &peek, i_more );
++        if( i_peeked <= pd.buf_size )
++            break;
++        uint8_t *p_more = realloc( pd.buf, i_peeked + AVPROBE_PADDING_SIZE );
++        if( unlikely(p_more == NULL) )
++            break;
++        pd.buf = p_more;
++        pd.buf_size = i_peeked;
++        memcpy( pd.buf, peek, i_peeked );
++        memset( pd.buf + i_peeked, 0, AVPROBE_PADDING_SIZE );
++        fmt = av_probe_input_format( &pd, 1 );
++    }
++
+     free( pd.buf );
+ 
+     if( fmt == NULL )
+-- 
+2.56.0
+

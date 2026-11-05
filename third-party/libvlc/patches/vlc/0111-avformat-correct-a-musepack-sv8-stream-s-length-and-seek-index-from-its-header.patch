@@ -1,0 +1,278 @@
+From 3fad32791e448a4a34310311361848b9f22b4e9e Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 19:28:00 +0900
+Subject: [PATCH] avformat: correct a musepack sv8 stream's length and seek
+ index from its header
+
+FFmpeg's demuxer states a Musepack SV8 stream's length in whole packets,
+of 64 frames of 1152 samples by default (1.67 s at 44.1 kHz), cutting off
+up to a packet: a 6 s stream was reported 5 s long and ended a second
+after its length. Take the length from the stream header's sample count
+at the stream's rate.
+
+The stream's seek table holds the position of every 2^n-th audio packet,
+n its seek distance, and FFmpeg indexes every entry at its packet's time
+but the second, which stands 2^n packets in and which it indexes one
+packet in. A seek to a time between the two landed at that entry, and
+FFmpeg timed the packets from it 2^n - 1 packets early, short of the
+seek's target: they were all dropped as sound before the target, to the
+end. In a 6 s stream of 1.67 s packets and a seek distance of 1, a seek to
+4 s landed at 3.3 s timed at 1.7 s and ended at once. Before a seek, read
+the seek distance from the table, whose position the seek table offset
+among the stream's first packets states, and index the entry at its
+packet's time and the second packet at the time FFmpeg gave the entry.
+Keep enough of the file's first bytes to find those packets in.
+---
+ modules/demux/avformat/demux.c | 201 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 198 insertions(+), 3 deletions(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index ee82504..551f740 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -84,6 +84,13 @@ struct demux_sys_t
+ 
+     unsigned    i_ssa_order;
+ 
++    /* Where a Musepack SV8 stream's seek table and its second audio packet
++     * are, as its header tells them, -1 where it does not, and the seek
++     * distance its table states, -1 until read, for FixSv8Index. */
++    int64_t     i_sv8_table;
++    int64_t     i_sv8_second;
++    int         i_sv8_distance;
++
+     int                i_attachments;
+     input_attachment_t **attachments;
+ 
+@@ -206,8 +213,9 @@ static void get_palette(es_format_t *fmt, const AVStream *s)
+ }
+ 
+ /* The bytes a file starts with, kept from its probe for what FFmpeg leaves
+- * of them unread: the AMV header is 88 bytes */
+-#define STATED_HEADER_SIZE 88
++ * of them unread: the AMV header is 88 bytes, and the packets a Musepack SV8
++ * stream holds before its first audio packet some 50 */
++#define STATED_HEADER_SIZE 256
+ 
+ /* The most of a stream looked at to tell its format when its first bytes do
+  * not: a format can be told only by a second unit, after a first of some
+@@ -261,6 +269,183 @@ static int64_t StatedDuration( AVFormatContext *ic, const uint8_t *p_header,
+     return AV_NOPTS_VALUE;
+ }
+ 
++/* Reads a Musepack SV8 variable-length number at [*pp] before [p_end]: seven
++ * bits a byte, most significant first, the top bit set on every byte but the
++ * last. Returns -1 when it does not end before [p_end]. */
++static int64_t ReadSv8Number( const uint8_t **pp, const uint8_t *p_end )
++{
++    int64_t i_value = 0;
++    while( *pp < p_end && i_value < ( INT64_MAX >> 7 ) )
++    {
++        const uint8_t c = *(*pp)++;
++        i_value = ( i_value << 7 ) | ( c & 0x7f );
++        if( !( c & 0x80 ) )
++            return i_value;
++    }
++    return -1;
++}
++
++/* A Musepack SV8 packet: its two-letter key at [p_start], then its size
++ * ([i_size], its key's and its size's own bytes included) and its payload at
++ * [p_payload]. A stream is "MPCK" and its packets, one after the other. */
++typedef struct
++{
++    const uint8_t *p_start;
++    const uint8_t *p_payload;
++    int64_t i_size;
++} sv8_packet_t;
++
++/* Reads the key and the size of the Musepack SV8 packet at [p] into
++ * [*p_packet]. Returns false when they do not end before [p_end] or the size
++ * is shorter than they are; the packet itself may end after [p_end]. */
++static bool ReadSv8Packet( const uint8_t *p, const uint8_t *p_end,
++                           sv8_packet_t *p_packet )
++{
++    if( p_end - p < 3 )
++        return false;
++    p_packet->p_start = p;
++    p += 2;
++    p_packet->i_size = ReadSv8Number( &p, p_end );
++    p_packet->p_payload = p;
++    return p_packet->i_size > p - p_packet->p_start;
++}
++
++/* The length of a Musepack SV8 stream, its stream header's sample count at
++ * its rate, or AV_NOPTS_VALUE. FFmpeg states the length in whole packets
++ * (by default 64 frames of 1152 samples, 1.67 s at 44.1 kHz), cutting off up
++ * to a packet: a 6 s stream was 5 s long. The header ("SH") is one of the
++ * packets that follow "MPCK": its CRC, the stream version and the sample
++ * count. */
++static int64_t Sv8Duration( AVFormatContext *ic, const uint8_t *p_header,
++                            size_t i_header )
++{
++    if( strcmp( ic->iformat->name, "mpc8" ) || ic->nb_streams != 1 ||
++        ic->streams[0]->codecpar->sample_rate <= 0 ||
++        i_header < 4 || memcmp( p_header, "MPCK", 4 ) )
++        return AV_NOPTS_VALUE;
++
++    const uint8_t *p_end = &p_header[i_header];
++    sv8_packet_t packet;
++    for( const uint8_t *p = &p_header[4]; ReadSv8Packet( p, p_end, &packet );
++         p += packet.i_size )
++    {
++        if( !memcmp( packet.p_start, "SH", 2 ) )
++        {
++            const uint8_t *p_samples = packet.p_payload + 4 + 1; /* its CRC and its version */
++            const int64_t i_samples = p_samples < p_end ? ReadSv8Number( &p_samples, p_end ) : -1;
++            if( i_samples <= 0 )
++                return AV_NOPTS_VALUE;
++            return av_rescale( i_samples, AV_TIME_BASE,
++                               ic->streams[0]->codecpar->sample_rate );
++        }
++        if( packet.i_size > p_end - packet.p_start )
++            return AV_NOPTS_VALUE;
++    }
++    return AV_NOPTS_VALUE;
++}
++
++/* Where a Musepack SV8 stream's seek table and its second audio packet are,
++ * in [*pi_table] and [*pi_second], -1 each that the packets in [p_header]
++ * before the first audio packet ("AP") do not tell: the seek table offset
++ * ("SO") states where the seek table is from itself, and the second audio
++ * packet follows the first. */
++static void Sv8Layout( const uint8_t *p_header, size_t i_header,
++                       int64_t *pi_table, int64_t *pi_second )
++{
++    *pi_table = *pi_second = -1;
++    if( i_header < 4 || memcmp( p_header, "MPCK", 4 ) )
++        return;
++
++    const uint8_t *p_end = &p_header[i_header];
++    sv8_packet_t packet;
++    for( const uint8_t *p = &p_header[4]; ReadSv8Packet( p, p_end, &packet );
++         p += packet.i_size )
++    {
++        const int64_t i_at = packet.p_start - p_header;
++        if( !memcmp( packet.p_start, "AP", 2 ) )
++        {
++            *pi_second = i_at + packet.i_size;
++            return;
++        }
++        if( !memcmp( packet.p_start, "SO", 2 ) )
++        {
++            const uint8_t *p_offset = packet.p_payload;
++            const int64_t i_offset = ReadSv8Number( &p_offset, p_end );
++            if( i_offset > 0 )
++                *pi_table = i_at + i_offset;
++        }
++        if( packet.i_size > p_end - packet.p_start )
++            return;
++    }
++}
++
++/* The seek distance the Musepack SV8 seek table at [i_table] states, read
++ * through FFmpeg's I/O as its demuxer reads the table, which is left where it
++ * was, or 0 when it is not read: "ST", its size, its entry count (at least
++ * the two entries FFmpeg misindexes), then the distance in the top four bits
++ * of a byte. */
++static int ReadSv8SeekDistance( AVFormatContext *ic, int64_t i_table )
++{
++    /* two numbers of at most nine bytes each before the distance */
++    uint8_t table[2 + 9 + 9 + 1];
++    const int64_t i_back = avio_tell( ic->pb );
++    if( avio_seek( ic->pb, i_table, SEEK_SET ) < 0 )
++        return 0;
++    const int i_read = avio_read( ic->pb, table, sizeof(table) );
++    avio_seek( ic->pb, i_back, SEEK_SET );
++
++    sv8_packet_t packet;
++    if( i_read <= 0 || !ReadSv8Packet( table, &table[i_read], &packet ) ||
++        memcmp( packet.p_start, "ST", 2 ) )
++        return 0;
++    const uint8_t *p = packet.p_payload;
++    if( ReadSv8Number( &p, &table[i_read] ) < 2 || p >= &table[i_read] )
++        return 0;
++    return *p >> 4;
++}
++
++/* Corrects the index FFmpeg's Musepack SV8 demuxer makes of a stream's seek
++ * table, before a seek, by when FFmpeg has read the table: it reads it at the
++ * table's offset, among the packets it reads as it opens the stream. The
++ * table holds the position of every 2^n-th audio packet (n its seek
++ * distance), and FFmpeg indexes each entry at its packet's time but the
++ * second, which stands 2^n packets in and is indexed one packet in. A seek to
++ * a time between the two landed at that entry, and FFmpeg timed the packets
++ * from it 2^n - 1 packets early, short of the seek's target, so that they
++ * were all dropped as sound before the target, to the end: in a 6 s stream
++ * of 1.67 s packets and a seek distance of 1, a seek to 4 s landed at 3.3 s
++ * timed at 1.7 s. Index the entry at its packet's time, and the second packet
++ * at the time FFmpeg gave the entry. An index whose entry at the second
++ * packet's time is the second packet's is right, a corrected one or one of a
++ * seek distance of 0; the table is read once, for the first wrong index. */
++static void FixSv8Index( demux_t *p_demux )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    AVFormatContext *ic = p_sys->ic;
++    const int64_t i_second = p_sys->i_sv8_second;
++
++    if( p_sys->i_sv8_table < 0 || i_second < 0 )
++        return;
++
++    AVStream *st = ic->streams[0];
++    const AVIndexEntry *p_entry =
++        avformat_index_get_entry_from_timestamp( st, 1, AVSEEK_FLAG_ANY );
++    if( p_entry == NULL || p_entry->timestamp != 1 || p_entry->pos == i_second )
++        return;
++    const int64_t i_entry = p_entry->pos;
++
++    if( p_sys->i_sv8_distance < 0 )
++        p_sys->i_sv8_distance = ReadSv8SeekDistance( ic, p_sys->i_sv8_table );
++    if( p_sys->i_sv8_distance <= 0 )
++        return;
++
++    const int64_t i_packets = INT64_C(1) << p_sys->i_sv8_distance;
++    av_add_index_entry( st, i_entry, i_packets, 0, 0, AVINDEX_KEYFRAME );
++    av_add_index_entry( st, i_second, 1, 0, 0, AVINDEX_KEYFRAME );
++    msg_Dbg( p_demux, "musepack sv8 index: its second entry moved to packet %"PRId64,
++             i_packets );
++}
++
+ /* The format FFmpeg recognises by its extension alone, without probing its
+  * bytes, that an input of type [psz_mime] is in, or NULL: an input handed over
+  * by its type, without a file name, is not recognised otherwise. */
+@@ -443,6 +628,8 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+     p_sys->fmt = fmt;
+     p_sys->tracks = NULL;
+     p_sys->i_ssa_order = 0;
++    p_sys->i_sv8_table = p_sys->i_sv8_second = -1;
++    p_sys->i_sv8_distance = -1;
+     TAB_INIT( p_sys->i_attachments, p_sys->attachments);
+     p_sys->p_title = NULL;
+ 
+@@ -540,6 +727,12 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+     if( p_sys->ic->duration == AV_NOPTS_VALUE )
+         p_sys->ic->duration = StatedDuration( p_sys->ic, header, i_header );
+ 
++    const int64_t i_sv8_duration = Sv8Duration( p_sys->ic, header, i_header );
++    if( i_sv8_duration != AV_NOPTS_VALUE )
++        p_sys->ic->duration = i_sv8_duration;
++    if( !strcmp( p_sys->fmt->name, "mpc8" ) && nb_streams == 1 )
++        Sv8Layout( header, i_header, &p_sys->i_sv8_table, &p_sys->i_sv8_second );
++
+     p_sys->tracks = calloc( nb_streams, sizeof(*p_sys->tracks) );
+     if( !p_sys->tracks )
+     {
+@@ -1198,7 +1391,9 @@ static int SeekFrame( demux_t *p_demux, int64_t i_time )
+                             ic->start_time : 0;
+     int i_video = -1;
+ 
+-    if( !strcmp( p_sys->fmt->name, "gxf" ) || !strcmp( p_sys->fmt->name, "pva" ) )
++    FixSv8Index( p_demux );
++
++    if( !strcmp( p_sys->fmt->name, "gxf" )|| !strcmp( p_sys->fmt->name, "pva" ) )
+     {
+         for( unsigned i = 0; i < p_sys->i_tracks && i_video < 0; i++ )
+             if( ic->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+-- 
+2.56.0
+

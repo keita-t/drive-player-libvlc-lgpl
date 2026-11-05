@@ -1,0 +1,52 @@
+From 5909c23408bd9099f085d6016532d9879943a196 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 19:25:01 +0900
+Subject: [PATCH] nuv: count the pictures after the last key picture into the
+ length
+
+The length was the last key picture's number in the seek table times the
+key picture distance: the pictures after the last key picture, up to a
+key picture distance, were left out, and a MythTV recording was reported
+that much short (a 6 s file with a key picture a second as 5 s). Read the
+frames from the last key picture to the end of the stream and count its
+pictures in.
+---
+ modules/demux/nuv.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/modules/demux/nuv.c b/modules/demux/nuv.c
+index aff2eef..c46006a 100644
+--- a/modules/demux/nuv.c
++++ b/modules/demux/nuv.c
+@@ -857,6 +857,28 @@ static int SeekTableLoad( demux_t *p_demux, demux_sys_t *p_sys )
+ 
+     p_sys->i_total_frames = (int64_t)frame;
+ 
++    /* The table lists key pictures only: the last one's number leaves out
++     * the pictures after it, up to a key picture distance. Count them from
++     * its frame to the end of the stream's frames. */
++    if( i_seek_elements > 0 )
++    {
++        const int64_t i_last = GetQWLE( p_seek_table + ( i_seek_elements - 1 ) * 12 );
++        if( i_last > 0 && !vlc_stream_Seek( p_demux->s, i_last ) )
++        {
++            int64_t i_pictures = 0;
++            while( !FrameHeaderLoad( p_demux, &fh ) &&
++                   fh.i_type != 'Q' && fh.i_type != 'K' && fh.i_type != 'X' )
++            {
++                if( fh.i_type == 'V' )
++                    i_pictures++;
++                if( fh.i_type != 'R' && fh.i_length > 0 &&
++                    vlc_stream_Read( p_demux->s, NULL, fh.i_length ) != fh.i_length )
++                    break;
++            }
++            p_sys->i_total_frames += i_pictures;
++        }
++    }
++
+     p_sys->b_index = true;
+ 
+     p_sys->i_total_length = p_sys->i_total_frames * 1000000 / p_sys->hdr.d_fps;
+-- 
+2.56.0
+

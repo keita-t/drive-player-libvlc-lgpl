@@ -1,0 +1,36 @@
+From 004f551653c4b9deac81cb89e95c905beea637c0 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 20:17:53 +0900
+Subject: [PATCH] avcodec: decode mimic without direct rendering
+
+MIMIC, MSN Messenger's webcam codec, predicts a picture from any of the 16
+before it and keeps them all. With direct rendering, they were pictures of
+the output's pool, sized for a few pictures held by a decoder: the pool
+ran out a few pictures into the stream, and the decoder waited for a
+picture none would free while the clock ran on. Decode MIMIC into the
+decoder's own buffers, copied into the output's pictures, as the codecs
+already left out of direct rendering are.
+---
+ modules/codec/avcodec/video.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index b8a3dca..802f613 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -542,7 +542,11 @@ static int InitVideoDecCommon( decoder_t *p_dec )
+         /* No idea why ... but this fixes flickering on some TSCC streams */
+         p_sys->p_codec->id != AV_CODEC_ID_TSCC &&
+         p_sys->p_codec->id != AV_CODEC_ID_CSCD &&
+-        p_sys->p_codec->id != AV_CODEC_ID_CINEPAK )
++        p_sys->p_codec->id != AV_CODEC_ID_CINEPAK &&
++        /* MIMIC keeps the last 16 pictures to predict from: drawn into the
++         * output's pictures, they held the pool, and the decoder waited for
++         * a picture none would free, a few pictures into the stream. */
++        p_sys->p_codec->id != AV_CODEC_ID_MIMIC )
+     {
+         /* Some codecs set pix_fmt only after the 1st frame has been decoded,
+          * so we need to do another check in ffmpeg_GetFrameBuf() */
+-- 
+2.56.0
+

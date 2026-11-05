@@ -1,0 +1,32 @@
+From 5de87eb6977fc6a3303231f19346dc25d0cdf702 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Tue, 3 Nov 2026 19:24:42 +0900
+Subject: [PATCH] avformat: allow seeking to the end of the stream
+
+IOSeek refused a seek to the stream's size as one past its end, and
+FFmpeg took the refusal for an error. A demuxer that skips a file's last
+chunk with a seek, as the DTS-HD one skips the stream data when it is the
+last chunk, failed to open the file, which the PS demuxer then opened
+without its sound. Refuse only a seek beyond the end.
+---
+ modules/demux/avformat/demux.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index be62502..5e119bd 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -1543,7 +1543,9 @@ static int64_t IOSeek( void *opaque, int64_t offset, int whence )
+         return -1;
+     }
+ 
+-    if( i_size > 0 && i_absolute >= i_size )
++    /* The end itself is a position: a demuxer skipping a file's last chunk
++     * seeks there, and refused, it failed to open the file. */
++    if( i_size > 0 && i_absolute > i_size )
+     {
+         msg_Dbg( p_demux, "Trying to seek too far : EOF?" );
+         return -1;
+-- 
+2.56.0
+

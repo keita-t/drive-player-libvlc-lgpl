@@ -1,0 +1,46 @@
+From 82e52092b10d9271a76b78f68839f37511d7062e Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 4 Nov 2026 15:24:36 +0900
+Subject: [PATCH] vout: select the subtitles of a picture forced on screen at
+ the time it is shown
+
+The output selects the subtitles drawn over a picture at the picture's
+date, and deletes those over by then. A picture forced on screen is
+shown at once, not at its date, and the first one of a start or a seek is
+forced while the input still buffers: its date was converted by the clock
+before the end of the buffering moved its origin, and stood up to the
+length buffered (0.6 s) later than the pictures after it. When the
+subtitle due at the position, which the decoder sends once the buffering
+ends, reached the output before that picture was shown, it was judged
+over at that date and deleted, and none of the pictures after it drew
+it: a seek inside a cue showed no subtitle until the next cue, at times.
+
+Select the subtitles of a picture forced on screen while playing at the
+time it is shown. A paused output still selects them at its pause date.
+---
+ src/video_output/video_output.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/video_output/video_output.c b/src/video_output/video_output.c
+index f20800b..9932e79 100644
+--- a/src/video_output/video_output.c
++++ b/src/video_output/video_output.c
+@@ -990,6 +990,15 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
+     vlc_tick_t render_subtitle_date;
+     if (vout->p->pause.is_on)
+         render_subtitle_date = vout->p->pause.date;
++    else if (vout->p->displayed.current->b_force)
++        /* A picture forced on screen is shown at once, not at its date, and
++         * the first one of a start or a seek is forced while the input still
++         * buffers: its date was converted by the clock before the end of the
++         * buffering moved its origin, up to the length buffered later than
++         * the pictures after it. Selected at that date, a subtitle due at the
++         * position the decoder sent meanwhile was judged over and deleted,
++         * and none of the pictures after it drew it. It is seen now. */
++        render_subtitle_date = mdate();
+     else
+         render_subtitle_date = filtered->date > 1 ? filtered->date : mdate();
+     vlc_tick_t render_osd_date = mdate(); /* FIXME wrong */
+-- 
+2.56.0
+
