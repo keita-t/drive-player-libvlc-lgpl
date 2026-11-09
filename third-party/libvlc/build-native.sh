@@ -82,7 +82,7 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 #   ffmpeg (+ zlib, gsm, openjpeg, its own dependencies)  demuxing and decoding of most formats;
 #     built without encoders, muxers or network protocols
 #   dav1d                           AV1
-#   ogg opus flac speex             the Xiph formats; vorbis is added by the variant (below)
+#   ogg opus flac speex             the Xiph formats; vorbis is added by the ogg-libvlc variant (below)
 #   theora                          Theora, by VLC's module: FFmpeg's frame threads hold a picture
 #                                   until as many packets as threads followed it, which a Theora
 #                                   stream of repeated (empty) frames may never send before its end
@@ -189,16 +189,16 @@ die() {
 }
 
 # The build variant, from the environment: ./local_build.sh sets it for a version named after it
-# (3.7.6-29-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-29). A variant changes
+# (3.7.6-38-ogg-libvlc is the ogg-libvlc variant of the recipe's 3.7.6-38). A variant changes
 # only which demuxer opens Ogg inputs, and with it how Vorbis is decoded, or which VLC patches apply:
-#   (none)        libVLC's own Ogg demuxer, which plays every link of a chained stream. It times
-#                 Vorbis pages through libvorbis, to seek by, so libvorbis and VLC's Vorbis
-#                 decoder are built.
-#   ogg-avformat  FFmpeg's demuxer (avformat) opens every Ogg input, whatever its codec or
+#   (none)        FFmpeg's demuxer (avformat) opens every Ogg input, whatever its codec or
 #                 declared type, and FFmpeg decodes Vorbis; libVLC's Ogg demuxer is left out.
 #                 A chained stream plays only its first link: FFmpeg's demuxer times each link
-#                 from zero and does not hand over a link whose settings change. Kept for the
-#                 comparison with libVLC's demuxer.
+#                 from zero and does not hand over a link whose settings change.
+#   ogg-libvlc    libVLC's own Ogg demuxer, which plays every link of a chained stream, as the
+#                 default build did up to 3.7.6-37. It times Vorbis pages through libvorbis, to
+#                 seek by, so libvorbis and VLC's Vorbis decoder are built. Kept for the
+#                 comparison with FFmpeg's demuxer, with the Ogg patches that demuxer needs.
 #   naked         the default build with only the VLC patches the app cannot run without
 #                 (NAKED_VLC_PATCHES): libVLC as upstream makes it, in the components and
 #                 configuration above, behind the app's callback input. libvlcjni's patches all
@@ -227,22 +227,17 @@ readonly RECIPE_PATCH_AUTHOR="drive-player@localhost"
 
 select_variant() {
     case "$LIBVLC_VARIANT" in
-        "")
-            OGG_DEMUXER="libVLC's ogg"
-            contrib_packages+=(vorbis)
-            vlc_configure_args+=(--enable-vorbis)
-            ;;
-        ogg-avformat)
+        ""|naked)
             OGG_DEMUXER="FFmpeg's (avformat)"
             vlc_configure_args+=(--disable-vorbis)
             module_blacklist+=(ogg)
             ;;
-        naked)
+        ogg-libvlc)
             OGG_DEMUXER="libVLC's ogg"
             contrib_packages+=(vorbis)
             vlc_configure_args+=(--enable-vorbis)
             ;;
-        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none, ogg-avformat or naked." ;;
+        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none, ogg-libvlc or naked." ;;
     esac
 }
 

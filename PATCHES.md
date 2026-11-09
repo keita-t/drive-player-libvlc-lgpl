@@ -1,17 +1,21 @@
 # Patches
 
 Drive Player's modifications to libvlcjni and VLC in this build. `third-party/libvlc/patches/libvlcjni/` (4 patches)
-is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (107 patches) to VLC after the patches libvlcjni itself
+is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (109 patches) to VLC after the patches libvlcjni itself
 carries, all with `git am`. Each patch's message describes its change in full; the tables below say what each one
 solved and what it changes, grouped by what they concern. Numbers missing from the series were removed or not adopted:
 0010 and 0018 are in the tags of earlier versions, and 0020-0024, never built, in this repository's history.
+
+This build opens Ogg with FFmpeg's demuxer and does not link libVLC's own. The patches to libVLC's Ogg demuxer
+(0033, 0035-0037, 0059, 0060 and 0116) are applied to the VLC source all the same, and take effect only in the
+`ogg-libvlc` variant of the recipe ([Ogg, with libVLC's own demuxer](#ogg-with-libvlcs-own-demuxer)).
 
 Back to the [README](README.md).
 
 - [License](#license) (2)
 - [Reading media through the app](#reading-media-through-the-app) (3)
 - [Opening and reading streams](#opening-and-reading-streams) (13)
-- [Video tracks and the app's window](#video-tracks-and-the-apps-window) (3)
+- [Video tracks and the app's window](#video-tracks-and-the-apps-window) (4)
 - [Audio](#audio) (12)
 - [Pause](#pause) (2)
 - [Seeking](#seeking) (17)
@@ -21,7 +25,7 @@ Back to the [README](README.md).
 - [Video output](#video-output) (4)
 - [Hardware decoders](#hardware-decoders) (5)
 - [FFmpeg's decoders](#ffmpegs-decoders) (10)
-- [Ogg, with libVLC's own demuxer](#ogg-with-libvlcs-own-demuxer) (5)
+- [Ogg, with libVLC's own demuxer](#ogg-with-libvlcs-own-demuxer) (6)
 
 ## License
 
@@ -63,6 +67,7 @@ Back to the [README](README.md).
 | [`vlc/0057`](third-party/libvlc/patches/vlc/0057-es_out-let-an-input-leave-its-video-tracks-unselected-until-one-is-asked-for.patch) | The input selected a video track, and made its decoder, as soon as it found it. The app makes its window once it knows the picture's size, from the track: MediaCodec cannot open its output without a window, and the decoder that took over (FFmpeg) decoded in software for as long as it lived. | The option `video-autoselect`, on by default. Turned off, a video track is selected only when one is asked for, as a subtitle track is without a preference. |
 | [`vlc/0058`](third-party/libvlc/patches/vlc/0058-es_out-describe-a-track-before-announcing-it.patch) | A track was announced (the elementary stream added) before its format was recorded in the input item's tracks: a listener reading the tracks when told could find it missing. | The track's information is recorded first, when it is added and when a program is selected again, then announced. |
 | [`vlc/0070`](third-party/libvlc/patches/vlc/0070-es_out-have-a-demuxer-read-a-video-track-left-for-the-application-while-nothing-is-selected.patch) | With `video-autoselect` off, a demuxer that finds no track selected and knows no length to wait out ended the input: a video-only AVI without an index, or a fragmented MP4, ended at its first demux, before the app could ask for its track. | While nothing of the input is selected, its program's video tracks are stated as selected to the demuxer, which reads on; their blocks find no decoder until one is asked for. |
+| [`vlc/0115`](third-party/libvlc/patches/vlc/0115-decoder-drop-the-pictures-of-a-video-decoder-selected-mid-timeline-until-a-flush.patch) | A window that came once the input had read on for the sound had the app select the video track then, and its decoder was given the blocks from where the demuxer read, not from a key picture. It made pictures from references it never had (grey or broken blocks), and the first of them was forced on screen and stood until the seek that starts the picture over flushed the decoder: a WMV1 start at 0.5 s showed grey or broken pictures first, at times. | A video decoder that a selection made after the timeline was fed drops its pictures until a flush; one that no seek follows shows them from a second past the first it dropped. A decoder made when the demuxer finds its track starts with it, as before. |
 
 ## Audio
 
@@ -196,6 +201,11 @@ Back to the [README](README.md).
 
 ## Ogg, with libVLC's own demuxer
 
+This build does not link libVLC's own Ogg demuxer: FFmpeg's opens Ogg, and FFmpeg decodes Vorbis. The patches to
+libVLC's demuxer here, and 0059 and 0060 under [Video size and pixel aspect](#video-size-and-pixel-aspect), are kept
+for the `ogg-libvlc` variant of the recipe, which builds that demuxer with libvorbis as the builds up to 3.7.6-37 did.
+0032 changes VLC's Speex decoder, which this build uses with FFmpeg's demuxer too.
+
 | Patch | Problem | Change |
 |---|---|---|
 | [`vlc/0032`](third-party/libvlc/patches/vlc/0032-speex-flush-only-bits-that-were-initialized.patch) | A seek before the first Speex packet reset bits that were not initialized, and crashed. | Bits are reset on a flush only once the headers initialized them. |
@@ -203,3 +213,4 @@ Back to the [README](README.md).
 | [`vlc/0035`](third-party/libvlc/patches/vlc/0035-oggseek-search-pages-for-a-time-before-estimating-from-the-bitrate.patch) | A single audio stream was sought by an estimate from its nominal bitrate: far off for variable-bitrate Vorbis, Speex and FLAC, and past the end of a small file. | Pages are searched by granule first; the estimate is used only where searching cannot be done. |
 | [`vlc/0036`](third-party/libvlc/patches/vlc/0036-ogg-time-flac-packets-by-their-frame-headers.patch) | Ogg times only a page's last packet, and a FLAC page can hold a second. FLAC packets were not interpolated, so after a seek the audio came a second behind its clock and was dropped. | Each FLAC packet is timed by the samples its frame header states, as Vorbis, Opus and Speex packets are. |
 | [`vlc/0037`](third-party/libvlc/patches/vlc/0037-oggseek-read-to-the-end-when-probing-the-length.patch) | The length probe stopped short of a last page that starts before the bytes it read, and took an earlier page's time. | It reads to the end each time and takes the greatest granule. |
+| [`vlc/0116`](third-party/libvlc/patches/vlc/0116-ogg-hold-the-clock-until-each-stream-played-has-had-a-time.patch) | The demuxer gave the lowest PCR among its streams that had a time. In a file of Theora and Vorbis the first Vorbis page comes after the second of pictures it covers: the clock ran on the pictures alone, the buffering ended without the sound, and the sound reached its decoder half a second late. The audio output moved the clock back to it: the time said went back 0.4 s, and the picture stood still 0.6 s about 1.5 s in. | While a selected stream of sound or pictures has had no time, the PCR stays at the timeline's first, as 0083 does for FFmpeg's demuxer, as long as the others are within ten seconds of it. |

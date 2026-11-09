@@ -1,0 +1,210 @@
+From 2abeaef6b416be6a326494319404c28ce700065f Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 9 Nov 2026 10:33:40 +0900
+Subject: [PATCH] decoder: drop the pictures of a video decoder selected
+ mid-timeline until a flush
+
+A video track selected once its timeline was fed has its decoder made then:
+a window that comes once the input has read on for the sound has the binding
+select the track it left off. The decoder is given the blocks from where
+the demuxer reads, not from a key picture, and makes its pictures from
+references it never had (grey or broken blocks), or shows a position the
+input read on to. The first of them was forced on screen at once, and stood
+until the seek that starts the picture over at the position flushed the
+decoder, when the input took that seek after the picture: a WMV1 start at
+0.5 s showed grey or broken pictures first, at times. A threshold on how
+late the decoder's first block is dated misses a selection made just after
+the timeline began, when the first block is a picture predicted from the
+key picture before it.
+
+Mark a video decoder that a selection made after the output gave a decoder
+a block of the timeline, and have it drop its pictures until a flush. A
+decoder the demuxer's finding of a track makes is not selected so, and
+starts with its track. A decoder no seek follows shows its pictures from a
+second past the first it dropped, as it did before.
+---
+ src/input/decoder.c | 50 ++++++++++++++++++++++++++++++++++++++++++++-
+ src/input/decoder.h |  7 +++++++
+ src/input/es_out.c  | 23 +++++++++++++++++++++
+ 3 files changed, 79 insertions(+), 1 deletion(-)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index e3dbccf..31db548 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -132,6 +132,12 @@ struct decoder_owner_sys_t
+     bool b_first;
+     bool b_has_data;
+ 
++    /* Made by a selection after its timeline began (input_DecoderJoinedLate):
++     * its pictures are dropped until a flush, or until one dated
++     * DECODER_LATE_JOIN_HOLD after the first it dropped; under lock */
++    bool b_joined_late;
++    vlc_tick_t i_late_join_first;
++
+     /* Flushing */
+     bool flushing;
+     bool b_draining;
+@@ -156,6 +162,11 @@ struct decoder_owner_sys_t
+  * a bogus PTS and won't be displayed */
+ #define DECODER_BOGUS_VIDEO_DELAY                ((vlc_tick_t)(DEFAULT_PTS_DELAY * 30))
+ 
++/* How far past the first picture it dropped a decoder that joined its timeline
++ * late shows its pictures although no flush came: a seek that starts it over
++ * comes long before, and a decoder no seek follows plays on as before */
++#define DECODER_LATE_JOIN_HOLD                   INT64_C(1000000)
++
+ /* */
+ #define DECODER_SPU_VOUT_WAIT_DURATION ((int)(0.200*CLOCK_FREQ))
+ #define BLOCK_FLAG_CORE_PRIVATE_RELOADED (1 << BLOCK_FLAG_CORE_PRIVATE_SHIFT)
+@@ -1120,6 +1131,29 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+         p_picture->b_force = true;
+     }
+ 
++    /* A decoder that joined its timeline late is given the blocks from where
++     * the demuxer had read on to, not from a key picture: its pictures are
++     * made from references it never had (grey or broken blocks), or show a
++     * position the input had read on to. The first is forced on screen at
++     * once, and stood until the seek that starts the picture over at the
++     * position flushed the decoder, when the input took that seek after the
++     * picture. Drop them until that flush. A decoder no seek follows shows
++     * its pictures from DECODER_LATE_JOIN_HOLD on, as it did before. */
++    if( p_owner->b_joined_late )
++    {
++        if( p_owner->i_late_join_first <= VLC_TICK_INVALID )
++        {
++            p_owner->i_late_join_first = p_picture->date;
++            msg_Dbg( p_dec, "dropping the pictures of a decoder that joined late until a flush" );
++        }
++        if( p_picture->date - p_owner->i_late_join_first < DECODER_LATE_JOIN_HOLD )
++        {
++            vlc_mutex_unlock( &p_owner->lock );
++            goto discard;
++        }
++        p_owner->b_joined_late = false;
++    }
++
+     const bool b_dated = p_picture->date > VLC_TICK_INVALID;
+     int i_rate = INPUT_RATE_DEFAULT;
+     DecoderFixTs( p_dec, &p_picture->date, NULL, NULL,
+@@ -1888,6 +1922,8 @@ static decoder_t * CreateDecoder( vlc_object_t *p_parent,
+     p_owner->b_waiting = false;
+     p_owner->b_first = true;
+     p_owner->b_has_data = false;
++    p_owner->b_joined_late = false;
++    p_owner->i_late_join_first = VLC_TICK_INVALID;
+ 
+     p_owner->error = false;
+ 
+@@ -2318,14 +2354,26 @@ void input_DecoderSetAudioTrim( decoder_t *p_dec, vlc_tick_t i_target )
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
++void input_DecoderJoinedLate( decoder_t *p_dec )
++{
++    decoder_owner_sys_t *p_owner = p_dec->p_owner;
++
++    vlc_mutex_lock( &p_owner->lock );
++    p_owner->b_joined_late = true;
++    p_owner->i_late_join_first = VLC_TICK_INVALID;
++    vlc_mutex_unlock( &p_owner->lock );
++}
++
+ void input_DecoderFlush( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+ 
+     /* A target set for the position the flush discards is no longer due;
+-     * one set for the next position comes after the flush is asked for */
++     * one set for the next position comes after the flush is asked for. So
++     * is a late join: the seek starts the decoder at the next timeline's. */
+     vlc_mutex_lock( &p_owner->lock );
+     p_owner->i_audio_trim = INT64_MIN;
++    p_owner->b_joined_late = false;
+     vlc_mutex_unlock( &p_owner->lock );
+ 
+     vlc_fifo_Lock( p_owner->p_fifo );
+diff --git a/src/input/decoder.h b/src/input/decoder.h
+index d2b802e..539bca5 100644
+--- a/src/input/decoder.h
++++ b/src/input/decoder.h
+@@ -48,6 +48,13 @@ void input_DecoderChangeDelay( decoder_t *, vlc_tick_t i_delay );
+  */
+ void input_DecoderStartWait( decoder_t * );
+ 
++/**
++ * Tell a video decoder that a selection made it after its timeline began, so
++ * that it is given the blocks from where the demuxer had read on to: its
++ * pictures are dropped until the next flush.
++ */
++void input_DecoderJoinedLate( decoder_t * );
++
+ /**
+  * Cut what of the next audio block comes before a precise seek's target: the
+  * block starting before it and ending after it, or one wholly before it that
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index ce407e8..e3777a3 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -173,6 +173,10 @@ struct es_out_sys_t
+     /* Current preroll */
+     vlc_tick_t  i_preroll_end;
+ 
++    /* Whether a decoder was given a block since the timeline last changed: a
++     * video decoder a selection makes from then on joins the timeline late */
++    bool        b_timeline_fed;
++
+     /* Used for buffering */
+     bool        b_buffering;
+     /* The demuxer reached its end: the decoders play on from what it sent,
+@@ -353,6 +357,7 @@ es_out_t *input_EsOutNew( input_thread_t *p_input, int i_rate )
+     p_sys->b_buffering = true;
+     p_sys->i_preroll_end = -1;
+     p_sys->i_prev_stream_level = -1;
++    p_sys->b_timeline_fed = false;
+ 
+     return out;
+ }
+@@ -668,6 +673,7 @@ static void EsOutChangePosition( es_out_t *out )
+     p_sys->i_buffering_extra_system = 0;
+     p_sys->i_preroll_end = -1;
+     p_sys->i_prev_stream_level = -1;
++    p_sys->b_timeline_fed = false;
+ }
+ 
+ 
+@@ -2201,6 +2207,8 @@ static int EsOutSend( es_out_t *out, es_out_id_t *es, block_t *p_block )
+         return VLC_SUCCESS;
+     }
+ 
++    p_sys->b_timeline_fed = true;
++
+     /* Check for sout mode */
+     if( input_priv(p_input)->p_sout )
+     {
+@@ -2470,7 +2478,22 @@ static int EsOutControlLocked( es_out_t *out, int i_query, va_list args )
+                     }
+                     else if( i_query == ES_OUT_SET_ES )
+                     {
++                        const bool b_had_decoder = es->p_dec != NULL;
+                         EsOutSelect( out, es, true );
++                        /* A video track selected once the timeline was fed —
++                         * turned on, or the binding's once a window came —
++                         * has its decoder given the blocks from where the
++                         * demuxer reads, not from a key picture: what it makes
++                         * of them before a seek starts it over is no picture
++                         * of the position (input_DecoderJoinedLate). A
++                         * decoder the demuxer's finding of a track makes is
++                         * not selected here, and starts with its track. */
++                        if( !b_had_decoder && es->p_dec != NULL
++                         && es->fmt.i_cat == VIDEO_ES && p_sys->b_timeline_fed )
++                        {
++                            msg_Dbg( p_sys->p_input, "video track %d selected mid-timeline", es->i_id );
++                            input_DecoderJoinedLate( es->p_dec );
++                        }
+                     }
+                     break;
+                 }
+-- 
+2.56.0
+

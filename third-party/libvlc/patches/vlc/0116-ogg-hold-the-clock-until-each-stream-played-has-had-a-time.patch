@@ -1,0 +1,141 @@
+From 90184fb4ad85e30f4568f2f9d49b9a02e4b086dd Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 9 Nov 2026 12:05:46 +0900
+Subject: [PATCH] ogg: hold the clock until each stream played has had a time
+
+The demuxer gives the lowest PCR among its streams with a time, and a
+stream with none yet does not count. A stream's first page comes after the
+others' pages up to that page's end: in an Ogg file of Theora and Vorbis,
+the first Vorbis page, holding the first second of sound, comes after the
+second of pictures it covers. The PCR from the pictures alone ran ahead of
+it, the buffering ended on them while the sound's decoder had nothing
+(the input gave up waiting for it), and the input waited for the clock
+before it read on: the sound reached its decoder half a second late. The
+audio output, taking its first block for one late past its deadline, moved
+the shared clock back to it: the time said went back 0.4 s, and the
+picture stood still 0.6 s about 1.5 s into the media.
+
+While a selected stream of sound or pictures has had no time, keep the
+PCR at the first one of the timeline, as the avformat demuxer does for a
+track with no time, so that the buffering reads on to that stream's first
+page, as long as the others are within ten seconds of that first PCR. The
+first PCR is still given, to set the clock at the start of the timeline.
+The timeline begins again with a seek and with a group of logical streams.
+---
+ modules/demux/ogg.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ modules/demux/ogg.h |  4 ++++
+ 2 files changed, 45 insertions(+)
+
+diff --git a/modules/demux/ogg.c b/modules/demux/ogg.c
+index 79fb7a4..77496a0 100644
+--- a/modules/demux/ogg.c
++++ b/modules/demux/ogg.c
+@@ -123,6 +123,7 @@ static int  Control( demux_t *, int, va_list );
+ /* Bitstream manipulation */
+ static int  Ogg_ReadPage     ( demux_t *, ogg_page * );
+ static void Ogg_UpdatePCR    ( demux_t *, logical_stream_t *, ogg_packet * );
++static bool Ogg_AwaitsTime( demux_t *, logical_stream_t * );
+ static void Ogg_DecodePacket ( demux_t *, logical_stream_t *, ogg_packet * );
+ static unsigned Ogg_OpusPacketDuration( ogg_packet * );
+ static unsigned Ogg_FlacPacketDuration( logical_stream_t *, ogg_packet * );
+@@ -338,6 +339,7 @@ static int Demux( demux_t * p_demux )
+                     es_out_SetPCR( p_demux->out, i_lastpcr );
+             }
+             p_sys->i_pcr = VLC_TICK_INVALID;
++            p_sys->i_first_pcr = VLC_TICK_INVALID;
+         }
+ 
+         if( Ogg_BeginningOfStream( p_demux ) != VLC_SUCCESS )
+@@ -666,6 +668,7 @@ static int Demux( demux_t * p_demux )
+      * handles PCR rewind (mute)
+      */
+     vlc_tick_t i_pcr_candidate = VLC_TICK_INVALID;
++    bool b_awaited = false;
+     for( i_stream = 0; i_stream < p_sys->i_streams; i_stream++ )
+     {
+         logical_stream_t *p_stream = p_sys->pp_stream[i_stream];
+@@ -681,7 +684,11 @@ static int Demux( demux_t * p_demux )
+         if( p_stream->fmt.i_codec == VLC_CODEC_OGGSPOTS )
+             continue;
+         if( p_stream->i_pcr < VLC_TICK_0 )
++        {
++            if( Ogg_AwaitsTime( p_demux, p_stream ) )
++                b_awaited = true;
+             continue;
++        }
+         if ( p_stream->b_finished || p_stream->b_initializing )
+             continue;
+         if ( p_stream->p_preparse_block )
+@@ -693,6 +700,22 @@ static int Demux( demux_t * p_demux )
+         }
+     }
+ 
++    /* A stream's first page comes after the others' pages up to that page's
++     * end: Vorbis's first, holding a second of sound, after the second of
++     * Theora pictures it covers. A PCR from the streams with a time alone ran
++     * ahead of it, the buffering ended on the pictures, and the input waited
++     * for the clock before it read on: the sound reached its decoder half a
++     * second late, the audio output moved the shared clock back to its first
++     * block, and the picture stood still for as long. While a played stream of
++     * sound or pictures has had no time, keep the PCR where the timeline began,
++     * so that the buffering reads on to it, as long as the others are within
++     * ten seconds of that, as the avformat demuxer waits for a track with no
++     * time. The first PCR is still given, to set the clock at the start. */
++    if( b_awaited && p_sys->i_first_pcr > VLC_TICK_INVALID
++     && i_pcr_candidate > VLC_TICK_INVALID
++     && i_pcr_candidate <= p_sys->i_first_pcr + 10 * CLOCK_FREQ )
++        i_pcr_candidate = VLC_TICK_INVALID;
++
+     if ( i_pcr_candidate > VLC_TICK_INVALID && p_sys->i_pcr != i_pcr_candidate )
+     {
+         if ( p_sys->i_streams == 1 && p_sys->i_access_delay )
+@@ -710,6 +733,8 @@ static int Demux( demux_t * p_demux )
+         if( ! b_skipping && p_sys->b_preparsing_done )
+         {
+             p_sys->i_pcr = i_pcr_candidate;
++            if( p_sys->i_first_pcr <= VLC_TICK_INVALID )
++                p_sys->i_first_pcr = i_pcr_candidate;
+             if( likely( !p_sys->b_slave ) )
+                 es_out_SetPCR( p_demux->out, p_sys->i_pcr );
+         }
+@@ -765,6 +790,22 @@ static void Ogg_ResetStreamsHelper( demux_sys_t *p_sys )
+ 
+     ogg_sync_reset( &p_sys->oy );
+     p_sys->i_pcr = VLC_TS_UNKNOWN;
++    p_sys->i_first_pcr = VLC_TICK_INVALID;
++}
++
++/* Whether [p_stream] is sound or pictures the input plays, and had no time
++ * yet: a stream not selected, or one of subtitles, which may have no page for
++ * minutes, has no time to be awaited, nor has one that ended. */
++static bool Ogg_AwaitsTime( demux_t *p_demux, logical_stream_t *p_stream )
++{
++    bool b_selected = false;
++
++    if( p_stream->p_es == NULL || p_stream->b_finished )
++        return false;
++    if( p_stream->fmt.i_cat != AUDIO_ES && p_stream->fmt.i_cat != VIDEO_ES )
++        return false;
++    es_out_Control( p_demux->out, ES_OUT_GET_ES_STATE, p_stream->p_es, &b_selected );
++    return b_selected;
+ }
+ 
+ static logical_stream_t * Ogg_GetSelectedStream( demux_t *p_demux )
+diff --git a/modules/demux/ogg.h b/modules/demux/ogg.h
+index 6ee2cf4..a537a0d 100644
+--- a/modules/demux/ogg.h
++++ b/modules/demux/ogg.h
+@@ -188,6 +188,10 @@ struct demux_sys_t
+     /* program clock reference (in units of 90kHz) derived from the pcr of
+      * the sub-streams */
+     vlc_tick_t i_pcr;
++    /* The first PCR of the timeline, since the demuxer opened, sought or began
++     * a group of logical streams: a played stream with no time yet is waited
++     * for within ten seconds of it (Ogg_AwaitsTime) */
++    vlc_tick_t i_first_pcr;
+     vlc_tick_t i_nzpcr_offset;
+     /* informative only */
+     vlc_tick_t i_pcr_jitter;
+-- 
+2.56.0
+
