@@ -1,7 +1,7 @@
 # Patches
 
-Drive Player's modifications to libvlcjni and VLC in this build. `third-party/libvlc/patches/libvlcjni/` (4 patches)
-is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (109 patches) to VLC after the patches libvlcjni itself
+Drive Player's modifications to libvlcjni and VLC in this build. `third-party/libvlc/patches/libvlcjni/` (5 patches)
+is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (110 patches) to VLC after the patches libvlcjni itself
 carries, all with `git am`. Each patch's message describes its change in full; the tables below say what each one
 solved and what it changes, grouped by what they concern. Numbers missing from the series were removed or not adopted:
 0010 and 0018 are in the tags of earlier versions, and 0020-0024, never built, in this repository's history.
@@ -15,7 +15,7 @@ Back to the [README](README.md).
 - [License](#license) (2)
 - [Reading media through the app](#reading-media-through-the-app) (3)
 - [Opening and reading streams](#opening-and-reading-streams) (13)
-- [Video tracks and the app's window](#video-tracks-and-the-apps-window) (4)
+- [Video tracks and the app's window](#video-tracks-and-the-apps-window) (6)
 - [Audio](#audio) (12)
 - [Pause](#pause) (2)
 - [Seeking](#seeking) (17)
@@ -68,6 +68,8 @@ Back to the [README](README.md).
 | [`vlc/0058`](third-party/libvlc/patches/vlc/0058-es_out-describe-a-track-before-announcing-it.patch) | A track was announced (the elementary stream added) before its format was recorded in the input item's tracks: a listener reading the tracks when told could find it missing. | The track's information is recorded first, when it is added and when a program is selected again, then announced. |
 | [`vlc/0070`](third-party/libvlc/patches/vlc/0070-es_out-have-a-demuxer-read-a-video-track-left-for-the-application-while-nothing-is-selected.patch) | With `video-autoselect` off, a demuxer that finds no track selected and knows no length to wait out ended the input: a video-only AVI without an index, or a fragmented MP4, ended at its first demux, before the app could ask for its track. | While nothing of the input is selected, its program's video tracks are stated as selected to the demuxer, which reads on; their blocks find no decoder until one is asked for. |
 | [`vlc/0115`](third-party/libvlc/patches/vlc/0115-decoder-drop-the-pictures-of-a-video-decoder-selected-mid-timeline-until-a-flush.patch) | A window that came once the input had read on for the sound had the app select the video track then, and its decoder was given the blocks from where the demuxer read, not from a key picture. It made pictures from references it never had (grey or broken blocks), and the first of them was forced on screen and stood until the seek that starts the picture over flushed the decoder: a WMV1 start at 0.5 s showed grey or broken pictures first, at times. | A video decoder that a selection made after the timeline was fed drops its pictures until a flush; one that no seek follows shows them from a second past the first it dropped. A decoder made when the demuxer finds its track starts with it, as before. |
+| [`vlc/0117`](third-party/libvlc/patches/vlc/0117-lib-describe-the-transfer-function-of-a-video-track.patch) | An application that draws a track's pictures itself has to know whether they are HDR to show them in SDR: a PQ or HLG picture drawn as it is looks washed out. The input item's track held the transfer function the demuxer or the decoder found, but the track description libVLC gives an application left it out. | The video track description carries the transfer function, as libVLC's `video_transfer_func_t` value. |
+| [`libvlcjni/0005`](third-party/libvlc/patches/libvlcjni/0005-describe-the-transfer-function-of-a-video-track.patch) | The bindings' video track had no transfer function either: the app's stills of a PQ or HLG video could not be told from SDR ones. | `IMedia.VideoTrack.colorTransfer` carries 0117's value, with libVLC's values named in `IMedia.VideoTrack.ColorTransfer`. |
 
 ## Audio
 

@@ -1,0 +1,114 @@
+From 064f09f958cc1a702398c1404f91f94eeef70b0f Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 11 Nov 2026 09:51:39 +0900
+Subject: [PATCH] Describe the transfer function of a video track
+
+libVLC's video track description now holds the transfer function its
+pictures are coded with. Carry it into IMedia.VideoTrack, with libVLC's
+values named, so an application drawing a track's pictures itself can
+tell a PQ or HLG picture, which it must map to SDR, from an SDR one.
+---
+ libvlc/jni/libvlcjni-media.c                  |  3 ++-
+ libvlc/jni/libvlcjni.c                        |  2 +-
+ libvlc/src/org/videolan/libvlc/Media.java     |  5 +++--
+ .../videolan/libvlc/interfaces/IMedia.java    | 21 ++++++++++++++++++-
+ 4 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/libvlc/jni/libvlcjni-media.c b/libvlc/jni/libvlcjni-media.c
+index 97573a8..9de14c5 100644
+--- a/libvlc/jni/libvlcjni-media.c
++++ b/libvlc/jni/libvlcjni-media.c
+@@ -647,7 +647,8 @@ media_track_to_object(JNIEnv *env, libvlc_media_track_t *p_tracks)
+                                 (jint)p_tracks->video->i_frame_rate_num,
+                                 (jint)p_tracks->video->i_frame_rate_den,
+                                 (jint)p_tracks->video->i_orientation,
+-                                (jint)p_tracks->video->i_projection);
++                                (jint)p_tracks->video->i_projection,
++                                (jint)p_tracks->video->i_color_transfer);
+             break;
+         case libvlc_track_text: {
+             jstring jencoding = NULL;
+diff --git a/libvlc/jni/libvlcjni.c b/libvlc/jni/libvlcjni.c
+index c3654aa..a2aca34 100644
+--- a/libvlc/jni/libvlcjni.c
++++ b/libvlc/jni/libvlcjni.c
+@@ -218,7 +218,7 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved)
+            fields.Media.createVideoTrackFromNativeID,
+            fields.Media.clazz,
+            "createVideoTrackFromNative",
+-           "(Ljava/lang/String;Ljava/lang/String;IIIIILjava/lang/String;Ljava/lang/String;IIIIIIII)"
++           "(Ljava/lang/String;Ljava/lang/String;IIIIILjava/lang/String;Ljava/lang/String;IIIIIIIII)"
+            "Lorg/videolan/libvlc/interfaces/IMedia$Track;");
+ 
+     GET_ID(GetStaticMethodID,
+diff --git a/libvlc/src/org/videolan/libvlc/Media.java b/libvlc/src/org/videolan/libvlc/Media.java
+index 84cd3c0..5c81789 100644
+--- a/libvlc/src/org/videolan/libvlc/Media.java
++++ b/libvlc/src/org/videolan/libvlc/Media.java
+@@ -51,10 +51,11 @@ public class Media extends VLCObject<IMedia.Event> implements IMedia {
+     private static Track createVideoTrackFromNative(String codec, String originalCodec, int fourcc, int id, int profile,
+             int level, int bitrate, String language, String description,
+             int height, int width, int sarNum, int sarDen, int frameRateNum, int frameRateDen,
+-            int orientation, int projection) {
++            int orientation, int projection, int colorTransfer) {
+         return new VideoTrack(codec, originalCodec, fourcc, id, profile,
+                 level, bitrate, language, description,
+-                height, width, sarNum, sarDen, frameRateNum, frameRateDen, orientation, projection);
++                height, width, sarNum, sarDen, frameRateNum, frameRateDen, orientation, projection,
++                colorTransfer);
+     }
+ 
+     @SuppressWarnings("unused") /* Used from JNI */
+diff --git a/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java b/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
+index 708914b..3e780a3 100644
+--- a/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
++++ b/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
+@@ -218,6 +218,22 @@ public interface IMedia extends IVLCObject<IMedia.Event> {
+             public static final int CubemapLayoutStandard = 0x100;
+         }
+ 
++        /**
++         * The transfer function a track's pictures are coded with (libVLC's
++         * video_transfer_func_t).
++         */
++        public static final class ColorTransfer {
++            public static final int Undefined = 0;
++            public static final int Linear = 1;
++            public static final int SRGB = 2;
++            public static final int BT470_BG = 3;
++            public static final int BT470_M = 4;
++            public static final int BT709 = 5;
++            public static final int SMPTE_ST2084 = 6;
++            public static final int SMPTE_240 = 7;
++            public static final int HLG = 8;
++        }
++
+         public final int height;
+         public final int width;
+         public final int sarNum;
+@@ -226,11 +242,13 @@ public interface IMedia extends IVLCObject<IMedia.Event> {
+         public final int frameRateDen;
+         public final int orientation;
+         public final int projection;
++        /** The transfer function the pictures are coded with, a {@link ColorTransfer} value. */
++        public final int colorTransfer;
+ 
+         public VideoTrack(String codec, String originalCodec, int fourcc, int id, int profile,
+                           int level, int bitrate, String language, String description,
+                           int height, int width, int sarNum, int sarDen, int frameRateNum, int frameRateDen,
+-                          int orientation, int projection) {
++                          int orientation, int projection, int colorTransfer) {
+             super(Type.Video, codec, originalCodec, fourcc, id, profile, level, bitrate, language, description);
+             this.height = height;
+             this.width = width;
+@@ -240,6 +258,7 @@ public interface IMedia extends IVLCObject<IMedia.Event> {
+             this.frameRateDen = frameRateDen;
+             this.orientation = orientation;
+             this.projection = projection;
++            this.colorTransfer = colorTransfer;
+         }
+     }
+ 
+-- 
+2.56.0
+
