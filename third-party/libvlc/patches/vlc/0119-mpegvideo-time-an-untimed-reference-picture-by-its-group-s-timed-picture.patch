@@ -1,0 +1,200 @@
+From e86b40d97df13d24917f5a264cc18b04b1597e43 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 12 Nov 2026 07:33:58 +0900
+Subject: [PATCH] mpegvideo: time an untimed reference picture by its group's
+ timed picture
+
+A program stream times a picture only by the first one to start in a
+packet: where pictures are smaller than a pack, as in a DVD's still or
+slow stretches, a P picture that starts after another in the same pack
+comes untimed. The packetizer leaves an untimed reference picture without
+a presentation time, and the decoder then times it by its decoding, which
+for a stream with B pictures comes before it is shown: by two frames with
+two B pictures between references. The video output drops each such
+picture as too late. A 25 fps interlaced MPEG-2 VOB with two B pictures
+lost six of its 25 pictures every second, each some 80 ms late, where the
+same stream in MPEG-TS or Matroska, which time every picture, lost none.
+
+Temporal references count a group of pictures' frames in the order they
+are shown. Keep the presentation time and temporal reference of the
+group's last frame picture the stream timed, and time an untimed
+reference picture of the group from it. A group's first reference
+picture can start in the pack the group before ended in and come untimed
+too, before any picture of its group is timed: at a group's header, carry
+the time over to the new group's first picture shown, which follows the
+last one the group before showed. A flush starts again untimed. Low-delay
+streams, field pictures and groups that repeat a field, where temporal
+references do not count frames at one rate, are left untimed as before.
+The VOB lost one picture a second, a group's untimed first, without the
+carrying over, and none with it.
+---
+ modules/packetizer/mpegvideo.c | 111 +++++++++++++++++++++++++++++++--
+ 1 file changed, 107 insertions(+), 4 deletions(-)
+
+diff --git a/modules/packetizer/mpegvideo.c b/modules/packetizer/mpegvideo.c
+index a429ebb..b31f8ce 100644
+--- a/modules/packetizer/mpegvideo.c
++++ b/modules/packetizer/mpegvideo.c
+@@ -154,6 +154,17 @@ struct decoder_sys_t
+ 
+     vlc_tick_t i_last_ref_pts;
+ 
++    /* A frame picture of the group of pictures being output that the stream
++     * timed, by its presentation time and temporal reference, or the first
++     * picture shown of a group the one before carried over to, the highest
++     * temporal reference of the group's frame pictures, and whether a picture
++     * of the group repeats a field: what times a reference picture the stream
++     * left untimed (GroupTimedReference, GroupCarry) */
++    vlc_tick_t i_group_anchor_pts;
++    int i_group_anchor_ref;
++    int i_group_last_ref;
++    bool b_group_repeats;
++
+     vlc_tick_t i_last_frame_pts;
+     uint16_t i_last_frame_refid;
+ 
+@@ -246,6 +257,10 @@ static int Open( vlc_object_t *p_this )
+     p_sys->b_inited = 0;
+ 
+     p_sys->i_last_ref_pts = VLC_TICK_INVALID;
++    p_sys->i_group_anchor_pts = VLC_TICK_INVALID;
++    p_sys->i_group_anchor_ref = 0;
++    p_sys->i_group_last_ref = -1;
++    p_sys->b_group_repeats = false;
+     p_sys->b_second_field = 0;
+ 
+     p_sys->i_next_block_flags = 0;
+@@ -344,6 +359,85 @@ static block_t *GetCc( decoder_t *p_dec, decoder_cc_desc_t *p_desc )
+ /*****************************************************************************
+  * OutputFrame: assemble and tag frame
+  *****************************************************************************/
++/* Whether the picture being output shows as one frame at the stream's rate,
++ * where its temporal reference counts frames in the order they are shown: a
++ * frame picture of a stream with B pictures, whose reference pictures are shown
++ * after pictures decoded later. */
++static bool GroupCountsFrames( const decoder_sys_t *p_sys )
++{
++    return !p_sys->b_low_delay && p_sys->i_frame_rate && p_sys->i_frame_rate_base
++        && ( p_sys->b_seq_progressive || p_sys->i_picture_structure == 0x03 );
++}
++
++/* Note the picture being output in its group of pictures: a group that repeats
++ * a field shows its pictures at no single rate, and a frame picture the stream
++ * timed anchors the presentation times of the others (GroupTimedReference). */
++static void GroupNote( decoder_sys_t *p_sys )
++{
++    if( p_sys->i_repeat_first_field )
++        p_sys->b_group_repeats = true;
++    if( !GroupCountsFrames( p_sys ) )
++        return;
++    if( p_sys->i_temporal_ref > p_sys->i_group_last_ref )
++        p_sys->i_group_last_ref = p_sys->i_temporal_ref;
++    if( p_sys->i_pts != VLC_TICK_INVALID )
++    {
++        p_sys->i_group_anchor_pts = p_sys->i_pts;
++        p_sys->i_group_anchor_ref = p_sys->i_temporal_ref;
++    }
++}
++
++/* Start counting a new group of pictures, whose temporal references count
++ * again from the first picture it shows, which comes after the last picture
++ * the group before showed. The group's first reference picture can start in
++ * the pack the group before ended in and come untimed: time the new group's
++ * first picture shown from the group before — its timed picture, and the
++ * highest temporal reference it showed — as long as that group was timed and
++ * counted at one rate, until a picture of the new group is timed by the
++ * stream. */
++static void GroupCarry( decoder_sys_t *p_sys )
++{
++    if( p_sys->i_group_anchor_pts != VLC_TICK_INVALID && !p_sys->b_group_repeats
++     && p_sys->i_group_last_ref >= p_sys->i_group_anchor_ref
++     && p_sys->i_frame_rate && p_sys->i_frame_rate_base )
++    {
++        date_t date;
++        date_Init( &date, p_sys->i_frame_rate, p_sys->i_frame_rate_base );
++        date_Set( &date, p_sys->i_group_anchor_pts );
++        date_Increment( &date, p_sys->i_group_last_ref + 1 - p_sys->i_group_anchor_ref );
++        p_sys->i_group_anchor_pts = date_Get( &date );
++        p_sys->i_group_anchor_ref = 0;
++    }
++    else
++        p_sys->i_group_anchor_pts = VLC_TICK_INVALID;
++    p_sys->i_group_last_ref = -1;
++    p_sys->b_group_repeats = false;
++}
++
++/* The presentation time of a reference picture the stream left untimed, from
++ * the frame picture of its group the stream timed: temporal references count
++ * the group's frames in the order they are shown. Left untimed, as before,
++ * without such a picture, in a group that repeats a field, and for a field
++ * picture: a decoder then times it by its decoding, which for a reference
++ * picture of a stream with B pictures comes before it is shown — by two frames
++ * with two B pictures between references, where the output drops it as late. */
++static vlc_tick_t GroupTimedReference( const decoder_sys_t *p_sys )
++{
++    if( p_sys->i_group_anchor_pts == VLC_TICK_INVALID || p_sys->b_group_repeats
++     || !GroupCountsFrames( p_sys ) )
++        return VLC_TICK_INVALID;
++
++    date_t date;
++    date_Init( &date, p_sys->i_frame_rate, p_sys->i_frame_rate_base );
++    date_Set( &date, p_sys->i_group_anchor_pts );
++    const int i_frames = p_sys->i_temporal_ref - p_sys->i_group_anchor_ref;
++    if( i_frames >= 0 )
++        date_Increment( &date, i_frames );
++    else
++        date_Decrement( &date, -i_frames );
++    return date_Get( &date );
++}
++
+ static block_t *OutputFrame( decoder_t *p_dec )
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -499,7 +593,10 @@ static block_t *OutputFrame( decoder_t *p_dec )
+ 
+         p_pic->i_dts = date_Get( &p_sys->dts );
+ 
+-        /* Set PTS only if we have a B frame or if it comes from the stream */
++        GroupNote( p_sys );
++
++        /* Set PTS only if we have a B frame or if it comes from the stream, or
++         * from the group's timed picture for a reference picture */
+         if( p_sys->i_pts != VLC_TICK_INVALID )
+         {
+             p_pic->i_pts = p_sys->i_pts;
+@@ -510,7 +607,7 @@ static block_t *OutputFrame( decoder_t *p_dec )
+         }
+         else
+         {
+-            p_pic->i_pts = VLC_TICK_INVALID;
++            p_pic->i_pts = GroupTimedReference( p_sys );
+         }
+ 
+         if( date_Get( &p_sys->dts ) != VLC_TICK_INVALID )
+@@ -573,7 +670,10 @@ static void PacketizeReset( void *p_private, bool b_broken )
+     date_Set( &p_sys->prev_iframe_dts, VLC_TICK_INVALID );
+     p_sys->i_dts =
+     p_sys->i_pts =
+-    p_sys->i_last_ref_pts = VLC_TICK_INVALID;
++    p_sys->i_last_ref_pts =
++    p_sys->i_group_anchor_pts = VLC_TICK_INVALID;
++    p_sys->i_group_last_ref = -1;
++    p_sys->b_group_repeats = false;
+     p_sys->b_waiting_iframe = p_sys->b_sync_on_intra_frame;
+     p_sys->i_prev_temporal_ref = 2048;
+ }
+@@ -700,7 +800,10 @@ static block_t *ParseMPEGBlock( decoder_t *p_dec, block_t *p_frag )
+      */
+     if( startcode == GROUP_STARTCODE )
+     {
+-        /* Group start code */
++        /* Group start code: the temporal references count again, from the
++         * group's first picture shown */
++        GroupCarry( p_sys );
++
+         if( p_sys->p_seq &&
+             p_sys->i_seq_old > p_sys->i_frame_rate/p_sys->i_frame_rate_base )
+         {
+-- 
+2.56.0
+

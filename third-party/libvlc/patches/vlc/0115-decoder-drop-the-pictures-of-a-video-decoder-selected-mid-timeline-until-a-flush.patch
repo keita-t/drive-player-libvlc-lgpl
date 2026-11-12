@@ -1,4 +1,4 @@
-From 2abeaef6b416be6a326494319404c28ce700065f Mon Sep 17 00:00:00 2001
+From 57788e21bb3e48ca5b874e7a9b04aed087b54d92 Mon Sep 17 00:00:00 2001
 From: Drive Player <drive-player@localhost>
 Date: Mon, 9 Nov 2026 10:33:40 +0900
 Subject: [PATCH] decoder: drop the pictures of a video decoder selected
@@ -18,34 +18,39 @@ the timeline began, when the first block is a picture predicted from the
 key picture before it.
 
 Mark a video decoder that a selection made after the output gave a decoder
-a block of the timeline, and have it drop its pictures until a flush. A
+a block of the timeline, and have it drop its pictures until a flush. The
+drop ends once the decoder thread has flushed the decoder and its output,
+not when the flush is asked for: until then a picture made from the blocks
+before it can still reach the output, and one that came between the end of
+the drop and the request would find the flush not yet asked for. A
 decoder the demuxer's finding of a track makes is not selected so, and
 starts with its track. A decoder no seek follows shows its pictures from a
 second past the first it dropped, as it did before.
 ---
- src/input/decoder.c | 50 ++++++++++++++++++++++++++++++++++++++++++++-
- src/input/decoder.h |  7 +++++++
- src/input/es_out.c  | 23 +++++++++++++++++++++
- 3 files changed, 79 insertions(+), 1 deletion(-)
+ src/input/decoder.c | 54 +++++++++++++++++++++++++++++++++++++++++++++
+ src/input/decoder.h |  7 ++++++
+ src/input/es_out.c  | 23 +++++++++++++++++++
+ 3 files changed, 84 insertions(+)
 
 diff --git a/src/input/decoder.c b/src/input/decoder.c
-index e3dbccf..31db548 100644
+index e3dbccf..11700c2 100644
 --- a/src/input/decoder.c
 +++ b/src/input/decoder.c
-@@ -132,6 +132,12 @@ struct decoder_owner_sys_t
+@@ -132,6 +132,13 @@ struct decoder_owner_sys_t
      bool b_first;
      bool b_has_data;
  
 +    /* Made by a selection after its timeline began (input_DecoderJoinedLate):
-+     * its pictures are dropped until a flush, or until one dated
-+     * DECODER_LATE_JOIN_HOLD after the first it dropped; under lock */
++     * its pictures are dropped until a flush has been done (DecoderProcessFlush),
++     * or until one dated DECODER_LATE_JOIN_HOLD after the first it dropped;
++     * under lock */
 +    bool b_joined_late;
 +    vlc_tick_t i_late_join_first;
 +
      /* Flushing */
      bool flushing;
      bool b_draining;
-@@ -156,6 +162,11 @@ struct decoder_owner_sys_t
+@@ -156,6 +163,11 @@ struct decoder_owner_sys_t
   * a bogus PTS and won't be displayed */
  #define DECODER_BOGUS_VIDEO_DELAY                ((vlc_tick_t)(DEFAULT_PTS_DELAY * 30))
  
@@ -57,7 +62,7 @@ index e3dbccf..31db548 100644
  /* */
  #define DECODER_SPU_VOUT_WAIT_DURATION ((int)(0.200*CLOCK_FREQ))
  #define BLOCK_FLAG_CORE_PRIVATE_RELOADED (1 << BLOCK_FLAG_CORE_PRIVATE_SHIFT)
-@@ -1120,6 +1131,29 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+@@ -1120,6 +1132,29 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
          p_picture->b_force = true;
      }
  
@@ -87,7 +92,23 @@ index e3dbccf..31db548 100644
      const bool b_dated = p_picture->date > VLC_TICK_INVALID;
      int i_rate = INPUT_RATE_DEFAULT;
      DecoderFixTs( p_dec, &p_picture->date, NULL, NULL,
-@@ -1888,6 +1922,8 @@ static decoder_t * CreateDecoder( vlc_object_t *p_parent,
+@@ -1669,8 +1704,15 @@ static void DecoderProcessFlush( decoder_t *p_dec )
+         }
+     }
+ 
++    /* A decoder that joined its timeline late shows its pictures again only
++     * now that the decoder and its output are flushed: until then a picture
++     * made from the blocks before the flush can still reach the output, and
++     * one that came while input_DecoderFlush was being asked for found the
++     * flush not yet requested. Cleared there, the drop could end before the
++     * flush began. */
+     vlc_mutex_lock( &p_owner->lock );
+     p_owner->i_preroll_end = INT64_MIN;
++    p_owner->b_joined_late = false;
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
+@@ -1888,6 +1930,8 @@ static decoder_t * CreateDecoder( vlc_object_t *p_parent,
      p_owner->b_waiting = false;
      p_owner->b_first = true;
      p_owner->b_has_data = false;
@@ -96,7 +117,7 @@ index e3dbccf..31db548 100644
  
      p_owner->error = false;
  
-@@ -2318,14 +2354,26 @@ void input_DecoderSetAudioTrim( decoder_t *p_dec, vlc_tick_t i_target )
+@@ -2318,6 +2362,16 @@ void input_DecoderSetAudioTrim( decoder_t *p_dec, vlc_tick_t i_target )
      vlc_mutex_unlock( &p_owner->lock );
  }
  
@@ -113,19 +134,8 @@ index e3dbccf..31db548 100644
  void input_DecoderFlush( decoder_t *p_dec )
  {
      decoder_owner_sys_t *p_owner = p_dec->p_owner;
- 
-     /* A target set for the position the flush discards is no longer due;
--     * one set for the next position comes after the flush is asked for */
-+     * one set for the next position comes after the flush is asked for. So
-+     * is a late join: the seek starts the decoder at the next timeline's. */
-     vlc_mutex_lock( &p_owner->lock );
-     p_owner->i_audio_trim = INT64_MIN;
-+    p_owner->b_joined_late = false;
-     vlc_mutex_unlock( &p_owner->lock );
- 
-     vlc_fifo_Lock( p_owner->p_fifo );
 diff --git a/src/input/decoder.h b/src/input/decoder.h
-index d2b802e..539bca5 100644
+index d2b802e..0241a3e 100644
 --- a/src/input/decoder.h
 +++ b/src/input/decoder.h
 @@ -48,6 +48,13 @@ void input_DecoderChangeDelay( decoder_t *, vlc_tick_t i_delay );
@@ -135,7 +145,7 @@ index d2b802e..539bca5 100644
 +/**
 + * Tell a video decoder that a selection made it after its timeline began, so
 + * that it is given the blocks from where the demuxer had read on to: its
-+ * pictures are dropped until the next flush.
++ * pictures are dropped until the next flush has been done.
 + */
 +void input_DecoderJoinedLate( decoder_t * );
 +

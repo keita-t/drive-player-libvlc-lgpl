@@ -10,7 +10,7 @@ sources, patches and build scripts that produced that build. Two builds matter:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-39 | `libvlc-lgpl-3.7.6-39` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-43 | `libvlc-lgpl-3.7.6-43` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
 | 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | `variants` | A build for comparison, which the app does not ship: libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without. The built library is attached to the GitHub release of its tag |
 
 ## Contents
@@ -48,7 +48,7 @@ it carries source patches for behaviour the app relies on.
 
 ### Patches
 
-`patches/libvlcjni/` (5 patches) is applied to libvlcjni, and `patches/vlc/` (110 patches) to VLC after the patches
+`patches/libvlcjni/` (5 patches) is applied to libvlcjni, and `patches/vlc/` (112 patches) to VLC after the patches
 libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
 change it makes:
 
@@ -58,10 +58,10 @@ change it makes:
 | [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 3 |
 | [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 13 |
 | [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 6 |
-| [Audio](PATCHES.md#audio) | 12 |
+| [Audio](PATCHES.md#audio) | 13 |
 | [Pause](PATCHES.md#pause) | 2 |
 | [Seeking](PATCHES.md#seeking) | 17 |
-| [Times and lengths](PATCHES.md#times-and-lengths) | 16 |
+| [Times and lengths](PATCHES.md#times-and-lengths) | 17 |
 | [Elementary video streams](PATCHES.md#elementary-video-streams) | 8 |
 | [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 11 |
 | [Video output](PATCHES.md#video-output) | 4 |

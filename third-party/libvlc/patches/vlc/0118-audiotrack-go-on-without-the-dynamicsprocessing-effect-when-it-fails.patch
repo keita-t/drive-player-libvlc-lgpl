@@ -1,0 +1,110 @@
+From b2bf1d9719260b706982752b34989294cd74955f Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 12 Nov 2026 06:28:16 +0900
+Subject: [PATCH] audiotrack: go on without the DynamicsProcessing effect when
+ it fails
+
+From Android 12, every AudioTrack the output makes gets a DynamicsProcessing
+effect on its session, which only applies a gain above unity: VolumeSet uses
+a software gain in its place when the effect is missing or failed. An
+exception from it was checked as any AudioTrack call's, which sets b_error:
+the writer thread stops, Play() drops every block, and the track the output
+started plays nothing for the rest of the stream while the input's clock
+runs on.
+
+Its constructor sets parameters on an effect the platform may be moving
+between output threads as tracks start and stop, as a device's own effects
+follow them, and can then throw. On a moto g64 5G (Android 15) the
+constructor threw an UnsupportedOperationException from
+setEngineArchitecture now and then while the device's Dolby effect moved,
+and the track was started, never written to and disabled by AudioFlinger for
+want of data: a played file stayed silent.
+
+Clear and warn of the effect's exceptions without setting b_error: its
+constructor's, which leaves the output without the effect, and those of
+setEnabled and setInputGainAllChannelsTo, which leave a gain above unity to
+the software gain.
+---
+ modules/audio_output/audiotrack.c | 37 ++++++++++++++++++++++++++-----
+ 1 file changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/modules/audio_output/audiotrack.c b/modules/audio_output/audiotrack.c
+index 15bb317..7905eab 100644
+--- a/modules/audio_output/audiotrack.c
++++ b/modules/audio_output/audiotrack.c
+@@ -538,6 +538,30 @@ check_exception( JNIEnv *env, audio_output_t *p_aout,
+ }
+ #define CHECK_AT_EXCEPTION( method ) check_exception( env, p_aout, method )
+ 
++/* An exception of a call to the DynamicsProcessing effect, which only applies a
++ * gain above unity (VolumeSet), with a software gain in its place when it is
++ * missing or failed: cleared and warned of, without setting b_error, which ends
++ * the output for the stream. Its constructor sets parameters on an effect the
++ * platform may be moving between output threads as tracks start and stop, as a
++ * device's own effects follow them, and can then throw (Android 15, an
++ * UnsupportedOperationException from setEngineArchitecture). */
++static inline bool
++check_effect_exception( JNIEnv *env, audio_output_t *p_aout,
++                        const char *method )
++{
++    if( (*env)->ExceptionCheck( env ) )
++    {
++        (*env)->ExceptionDescribe( env );
++        (*env)->ExceptionClear( env );
++        msg_Warn( p_aout, "AudioTrack.%s triggered an exception, "
++                  "the output goes on without it", method );
++        return true;
++    }
++    else
++        return false;
++}
++#define CHECK_EFFECT_EXCEPTION( method ) check_effect_exception( env, p_aout, method )
++
+ #define JNI_CALL( what, obj, method, ... ) (*env)->what( env, obj, method, ##__VA_ARGS__ )
+ 
+ #define JNI_CALL_INT( obj, method, ... ) JNI_CALL( CallIntMethod, obj, method, ##__VA_ARGS__ )
+@@ -962,7 +986,7 @@ AudioTrack_New( JNIEnv *env, audio_output_t *p_aout, unsigned int i_rate,
+             jobject dp = JNI_CALL( NewObject, jfields.DynamicsProcessing.clazz,
+                                    jfields.DynamicsProcessing.ctor, session_id );
+ 
+-            if( !CHECK_AT_EXCEPTION( "DynamicsProcessing.ctor" ) )
++            if( !CHECK_EFFECT_EXCEPTION( "DynamicsProcessing.ctor" ) )
+             {
+                 p_sys->p_dp = (*env)->NewGlobalRef( env, dp );
+                 (*env)->DeleteLocalRef( env, dp );
+@@ -1531,7 +1555,7 @@ Stop( audio_output_t *p_aout )
+     if( p_sys->p_dp )
+     {
+         JNI_CALL_INT( p_sys->p_dp, jfields.DynamicsProcessing.setEnabled, false );
+-        CHECK_AT_EXCEPTION( "DynamicsProcessing.setEnabled" );
++        CHECK_EFFECT_EXCEPTION( "DynamicsProcessing.setEnabled" );
+ 
+         (*env)->DeleteGlobalRef( env, p_sys->p_dp );
+         p_sys->p_dp = NULL;
+@@ -2249,7 +2273,7 @@ VolumeSet( audio_output_t *p_aout, float volume )
+                 /* DynamicsProcessing is not needed anymore (using AudioTrack
+                  * volume) */
+                 JNI_CALL_INT( p_sys->p_dp, jfields.DynamicsProcessing.setEnabled, false );
+-                CHECK_AT_EXCEPTION( "DynamicsProcessing.setEnabled" );
++                CHECK_EFFECT_EXCEPTION( "DynamicsProcessing.setEnabled" );
+             }
+             else
+             {
+@@ -2257,9 +2281,12 @@ VolumeSet( audio_output_t *p_aout, float volume )
+                 float dB = 20.0f * log10f(gain);
+ 
+                 JNI_CALL_VOID( p_sys->p_dp, jfields.DynamicsProcessing.setInputGainAllChannelsTo, dB );
+-                int ret = JNI_CALL_INT( p_sys->p_dp, jfields.DynamicsProcessing.setEnabled, true );
++                const bool b_gain_failed =
++                    CHECK_EFFECT_EXCEPTION( "DynamicsProcessing.setInputGainAllChannelsTo" );
++                int ret = b_gain_failed ? -1
++                        : JNI_CALL_INT( p_sys->p_dp, jfields.DynamicsProcessing.setEnabled, true );
+ 
+-                if( !CHECK_AT_EXCEPTION( "DynamicsProcessing.setEnabled" ) && ret == 0 )
++                if( !b_gain_failed && !CHECK_EFFECT_EXCEPTION( "DynamicsProcessing.setEnabled" ) && ret == 0 )
+                     gain = 1.0; /* reset sw gain */
+                 else
+                     msg_Warn( p_aout, "failed to set gain via DynamicsProcessing, fallback to sw gain");
+-- 
+2.56.0
+
