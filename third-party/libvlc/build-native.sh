@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds the native half of Drive Player's libVLC — libvlc.so, libvlcjni.so and libc++_shared.so
+# Builds the native half of DrivePlayer's libVLC — libvlc.so, libvlcjni.so and libc++_shared.so
 # for arm64-v8a — from sources licensed under the GNU LGPL 2.1 or more permissively, and with only
 # what the app plays.
 #
@@ -272,7 +272,7 @@ apply_patches() {
     local dir="$1"
     shift
     [ "$#" -gt 0 ] || return 0
-    git -C "$dir" -c user.name="Drive Player" -c user.email="drive-player@localhost" \
+    git -C "$dir" -c user.name="DrivePlayer" -c user.email="drive-player@localhost" \
         am -q --message-id "$@"
 }
 

@@ -1,6 +1,6 @@
-# libVLC for Drive Player — corresponding source
+# libVLC for DrivePlayer — corresponding source
 
-This repository holds the complete corresponding source of the libVLC library that the Drive Player
+This repository holds the complete corresponding source of the libVLC library that the DrivePlayer
 Android app ships: `com.example.driveplayer.thirdparty:libvlc-lgpl`, a build of libVLC and its Java
 bindings (libvlcjni) made from sources under the GNU Lesser General Public License 2.1 or more
 permissive licenses only, for arm64-v8a.
@@ -17,17 +17,17 @@ sources, patches and build scripts that produced that build. Two builds matter:
 
 | Path | What it is |
 |---|---|
-| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with Drive Player's patches applied |
-| `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and Drive Player's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
+| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with DrivePlayer's patches applied |
+| `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and DrivePlayer's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
 | `sources/contrib/` | The source archives of the 26 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
 | `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
-| `third-party/libvlc/patches/` | Drive Player's modifications to libvlcjni and VLC, as `git am` patches |
+| `third-party/libvlc/patches/` | DrivePlayer's modifications to libvlcjni and VLC, as `git am` patches |
 | `PATCHES.md` | What each patch solved and what it changes |
 | `third-party/libvlc/aar/` | The Gradle build that packages the libraries and the Java bindings as an Android library (AAR) |
 | `gradle/`, `gradlew` | The Gradle wrapper (Gradle 8.13) and the version entries the AAR build reads |
 
-The layout of `third-party/libvlc/` and `gradle/` matches the Drive Player source tree, where the same
+The layout of `third-party/libvlc/` and `gradle/` matches the DrivePlayer source tree, where the same
 files are used unchanged.
 
 ## What was changed, and why
@@ -116,7 +116,7 @@ upstream locations. To build from this repository's copies instead:
 ## Licenses
 
 libVLC, libvlcjni and this build are distributed under the GNU Lesser General Public License, version 2.1
-or later ([LICENSE](LICENSE)). Drive Player's build scripts and patches in this repository are provided
+or later ([LICENSE](LICENSE)). DrivePlayer's build scripts and patches in this repository are provided
 under the same license. Each third-party component in `sources/contrib/` is distributed under its own
 license, found in its archive:
 

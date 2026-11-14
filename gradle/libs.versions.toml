@@ -1,4 +1,4 @@
-# The entries of Drive Player's version catalog that third-party/libvlc/aar reads: the Android
+# The entries of DrivePlayer's version catalog that third-party/libvlc/aar reads: the Android
 # Gradle Plugin the library is packaged with, and the coordinates it is published under.
 [versions]
 agp = "8.11.2"

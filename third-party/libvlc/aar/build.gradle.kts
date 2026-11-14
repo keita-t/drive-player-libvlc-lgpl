@@ -74,9 +74,9 @@ publishing {
                 from(components["release"])
             }
             pom {
-                name.set("libVLC for Android (Drive Player build)")
+                name.set("libVLC for Android (DrivePlayer build)")
                 description.set(
-                    "libVLC and its libvlcjni bindings, built by Drive Player from VideoLAN's sources " +
+                    "libVLC and its libvlcjni bindings, built by DrivePlayer from VideoLAN's sources " +
                         "under the GNU LGPL 2.1 only, for arm64-v8a.",
                 )
                 licenses {
