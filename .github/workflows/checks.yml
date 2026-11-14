@@ -1,0 +1,39 @@
+name: Repository checks
+
+on:
+  push:
+    branches: [main, ogg-libvlc, naked]
+  pull_request:
+    branches: [main, ogg-libvlc, naked]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python3 scripts/check_docs.py
+      - run: python3 -m unittest discover -s tests
+      - run: bash -n third-party/libvlc/build-native.sh
+
+  releases:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/check_releases.py
+        env:
+          GH_TOKEN: ${{ github.token }}

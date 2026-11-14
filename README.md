@@ -1,83 +1,72 @@
-# libVLC for Drive Player — corresponding source of comparison builds
+# libVLC for DrivePlayer — corresponding source
 
-This branch, `variants`, holds the complete corresponding source of builds of
-`com.example.driveplayer.thirdparty:libvlc-lgpl` that are made for comparison and that the Drive Player Android app
-does not ship. Each is built from the same recipe as an app build, as one of its variants, and is published here so
-that the app's development can test against it without building it: its tag (`libvlc-lgpl-<version>`) holds exactly
-the sources, patches and build scripts that produced it, and the GitHub release of that tag carries the built
-library. The sources of the builds the app ships are on `main`.
+English | [日本語](README.ja.md)
 
-| Library version | Tag | What it is |
-|---|---|---|
-| 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without |
+This branch (`naked`) holds the complete corresponding source of the comparison build
+`com.example.driveplayer.thirdparty:libvlc-lgpl` 3.7.6-29-naked, for arm64-v8a under the GNU LGPL 2.1
+or more permissive licenses. The app does not ship this build: it applies only the two VLC patches the
+app cannot run without, plus all four Java binding patches. The app's build is tracked on `main`.
 
-## 3.7.6-29-naked
+Each published build of the library has a tag named after its version (`libvlc-lgpl-<version>`), holding exactly the
+sources, patches and build scripts that produced that build. Each maintained branch keeps its latest
+published build available as a GitHub Release; older releases remain available too:
 
-The `naked` variant of the 3.7.6-29 recipe: the same pinned libvlcjni and VLC, the same components, configuration
-and modules as the app's 3.7.6-29, but of Drive Player's VLC patches only the two the app cannot run without — the
-LGPL-only configuration (`vlc/0001`) and its callback input read as a file (`vlc/0002`) — and the four patches of
-the Java bindings, whose API the app calls. Everything else behaves as upstream's libVLC does, so the app can be run
-against it to see what one of its own patches changes, or whether a fault comes from upstream.
+| Library version | Tag | Branch | What it is |
+|---|---|---|---|
+| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
+| 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
 
-### Contents
+The branches track different recipes and versions independently; their latest releases do not have to share a
+version number. `ogg-libvlc` starts from the existing 3.7.6-37 tag and `naked` from 3.7.6-29-naked. The old
+`variants` branch is retained as historical source; new comparison builds belong on their named branch.
+Existing tags and binary assets retain their original names and contents.
+
+## Contents
 
 | Path | What it is |
 |---|---|
-| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with Drive Player's patches applied (the same archive as the app's builds on `main`) |
-| `sources/vlc-66455a98-drive-player-naked.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and Drive Player's `vlc/0001` and `vlc/0002` applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
+| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with DrivePlayer's patches applied |
+| `sources/vlc-66455a98-drive-player-naked.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and only DrivePlayer's VLC patches 0001 and 0002 applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
 | `sources/contrib/` | The source archives of the 27 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
-| `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so`; `LIBVLC_VARIANT=naked` selects this build (`NAKED_VLC_PATCHES`) |
-| `third-party/libvlc/patches/` | The patches this build applies, as `git am` patches |
+| `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
+| `third-party/libvlc/patches/` | DrivePlayer's modifications to libvlcjni and VLC, as `git am` patches |
+| `PATCHES.md` | What each patch solved and what it changes |
 | `third-party/libvlc/aar/` | The Gradle build that packages the libraries and the Java bindings as an Android library (AAR) |
 | `gradle/`, `gradlew` | The Gradle wrapper (Gradle 8.7) and the version entries the AAR build reads |
 
-The release `libvlc-lgpl-3.7.6-29-naked` carries `libvlc-lgpl-3.7.6-29-naked.tar.xz`: the AAR and its Maven metadata
-under `repository/com/example/driveplayer/thirdparty/libvlc-lgpl/3.7.6-29-naked/`, and under
-`versions/3.7.6-29-naked/out/` the stripped libraries, the Java bindings, each component's license files and
-`build-info.txt` (revisions, patches, component versions, linked modules). Drive Player installs it with
-`./local_build.sh --libvlc-version 3.7.6-29-naked --fetch-libvlc`, which checks the archive's SHA-256 against the
-one its checkout records.
+The layout of `third-party/libvlc/` and `gradle/` matches the DrivePlayer source tree, where the same
+files are used unchanged.
 
-### What was changed, and why
+## What was changed, and why
 
-#### Left out
+This build differs from the libVLC VideoLAN publishes on Maven Central (`org.videolan.android:libvlc-all`) in three
+ways: it contains no component under the GNU General Public License, it leaves out what the app does not use, and
+it carries source patches for behaviour the app relies on.
+
+### Left out
 
 | What | How the build ensures it |
 |---|---|
 | Third-party components under the GPL | Components are chosen from an explicit list (`contrib_packages` in `build-native.sh`), and VLC's contrib system runs with its GPL and GPLv3 guards on. FFmpeg's configuration is checked to have its GPL, version 3 and non-free parts disabled. |
 | VLC modules under the GPL | They are not linked (`module_blacklist`), and the build stops if any linked module declares the GPL. |
-| GPL sources inside LGPL code | The renderer discoverer of the Java bindings and the yadif deinterlacing algorithm are removed (License patches below). |
+| GPL sources inside LGPL code | The renderer discoverer of the Java bindings and the yadif deinterlacing algorithm are removed (the [License patches](PATCHES.md#license)). |
 | Features the app does not use | Stream output (transcoding, recording, casting), network access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and the modules listed in `module_blacklist`. |
 
-#### Patches
+### Patches
 
-`patches/libvlcjni/` is applied to libvlcjni, and `patches/vlc/` to VLC after the patches libvlcjni itself carries,
-all with `git am`. Each patch's message describes its change in full. The app's builds on `main` carry further VLC
-patches; this build leaves them out.
+`patches/libvlcjni/` (4 patches) is applied to libvlcjni, and `patches/vlc/` (2 patches) to VLC after the patches
+libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
+change it makes:
 
-##### License
+| What they concern | Patches |
+|---|---|
+| [License](PATCHES.md#license) | 2 |
+| [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 2 |
+| [Bindings](PATCHES.md#bindings) | 2 |
 
-| Patch | Problem | Change |
-|---|---|---|
-| [`libvlcjni/0001`](third-party/libvlc/patches/libvlcjni/0001-build-the-bindings-without-the-renderer-discoverer.patch) | The renderer discoverer, `RendererDiscoverer.java`, is published under the GPL. | Its JNI part is removed, and the AAR build leaves the Java file out of the packaged sources. |
-| [`vlc/0001`](third-party/libvlc/patches/vlc/0001-deinterlace-build-without-the-yadif-algorithm.patch) | The yadif deinterlacing algorithm is published under the GPL. | yadif is removed from the deinterlace module. |
-
-##### Reading media through the app
-
-| Patch | Problem | Change |
-|---|---|---|
-| [`libvlcjni/0002`](third-party/libvlc/patches/libvlcjni/0002-add-a-media-read-through-java-callbacks.patch) | The app answered reads through a file descriptor of its own (Android's proxy file descriptor). Such a descriptor cannot be torn down when the app's process is killed while libVLC waits on a read, and keeps a CPU core busy until the device restarts. | `org.videolan.libvlc.MediaInput`, and a `Media` constructor that reads through its Java callbacks (`libvlc_media_new_callbacks`). |
-| [`vlc/0002`](third-party/libvlc/patches/vlc/0002-imem-access-report-seekable-callbacks-as-fast-seekable.patch) | A callback input was read through the prefetch filter's large background reads. | A callback input that answers seeks is read like a file (fast-seekable). |
-
-##### Bindings
-
-| Patch | Problem | Change |
-|---|---|---|
-| [`libvlcjni/0003`](third-party/libvlc/patches/libvlcjni/0003-cancel-surface-initialization-on-view-release.patch) | Detaching views could race the bindings' texture initialization and use a Surface not yet made; unattached callback loopers stayed alive. | The texture and its Surface are published together, detaching cancels pending initialization, and the callback thread is joined without holding its monitor. |
-| [`libvlcjni/0004`](third-party/libvlc/patches/libvlcjni/0004-expose-current-input-track-formats.patch) | MPEG-PS and MPEG-TS tracks are identified before the decoder learns their size and pixel aspect, and parsed metadata cached zero dimensions. | `IMedia.getTracksSnapshot()` reads the input's current formats, with the size, pixel aspect and orientation found while decoding. |
-
-### Build
+## Build
 
 The native libraries are built inside VideoLAN's Android build image, which provides NDK r29 and the
 tools VLC's build expects. The image is pinned by digest:
@@ -97,8 +86,9 @@ docker run --rm --init \
     bash /recipe/build-native.sh
 ```
 
-The libraries, the Java bindings and a record of the build (`build-info.txt`) are left in `work/out/`. The AAR is
-then packaged with JDK 21 and an Android SDK with platform 36 (`ANDROID_HOME` set):
+The libraries, the Java bindings and a record of the build (`build-info.txt`: revisions, component
+versions, linked modules) are left in `work/out/`. The AAR is then packaged with JDK 21 and an Android SDK
+with platform 36 (`ANDROID_HOME` set):
 
 ```bash
 ./gradlew -p third-party/libvlc/aar publish \
@@ -106,6 +96,11 @@ then packaged with JDK 21 and an Android SDK with platform 36 (`ANDROID_HOME` se
     -Plibvlc.repository="$PWD/repository" \
     -Plibvlc.variant=naked
 ```
+
+Use `LIBVLC_VARIANT=naked` for this branch's native build and `-Plibvlc.variant=naked` when packaging
+the AAR, as in the commands above. This retains the 3.7.6-29-naked recipe: only VLC patches 0001 and 0002
+and all four Java binding patches apply. Unlike current main's naked option, this historical build opens
+Ogg with libVLC's own demuxer and includes libvorbis. The VLC archive already contains just these patches.
 
 `build-native.sh` fetches the pinned libvlcjni and VLC commits and the component archives from their
 upstream locations. To build from this repository's copies instead:
@@ -116,10 +111,48 @@ upstream locations. To build from this repository's copies instead:
 - Copy `sources/contrib/*` to `work/tarballs/`. VLC's contrib build uses the archives it finds there and
   verifies each against the SHA-512 it records in `contrib/src/<component>/SHA512SUMS`.
 
+## Maintaining the branches, documentation and releases
+
+Make recipe and patch changes on the branch for that build. This branch (`naked`) retains its historical recipe;
+the `ogg-libvlc` and `naked` READMEs describe their own versions and build options. Changes shared by all
+branches, such as documentation checks, should be applied to all three without merging their source archives.
+
+English is the default. Update `README.md` together with `README.ja.md`, and `PATCHES.md` together with
+`PATCHES.ja.md`, in the same change. After reviewing the translations, run:
+
+```bash
+python3 scripts/check_docs.py --update
+python3 scripts/check_docs.py
+python3 -m unittest discover -s tests
+```
+
+The check records the English source's SHA-256 in each Japanese document, detects untranslated source
+updates, and checks patch coverage, links and build commands. It does not assess translation quality;
+review both languages before refreshing the hashes. GitHub Actions runs the checks for all three branches.
+
+For a new release, first commit its complete corresponding source on the appropriate branch and tag that
+commit as `libvlc-lgpl-<version>`. Build and verify the binary archive using that tag's recipe and retain the
+archive layout described by the existing release. Publish the archive with that branch as the target:
+
+```bash
+branch=ogg-libvlc # main, ogg-libvlc or naked
+tag='libvlc-lgpl-<version>'
+gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
+    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+```
+
+Replace `<version>` with the actual version (including any variant suffix) before running the command.
+Release notes should identify the branch, source tag, build options, archive contents and SHA-256.
+For `main`, use `--latest=true`; comparison releases use `--latest=false`. Update the branch's entry in
+`.github/release-branches.json` on all three branches, along with both README release tables. Keep at least
+the newest stable release and its binary asset public for each branch; do not delete older releases as part
+of this maintenance. The daily and manual release checks verify publication, assets, branch ancestry and
+that the repository-wide Latest release belongs to `main`.
+
 ## Licenses
 
 libVLC, libvlcjni and this build are distributed under the GNU Lesser General Public License, version 2.1
-or later ([LICENSE](LICENSE)). Drive Player's build scripts and patches in this repository are provided
+or later ([LICENSE](LICENSE)). DrivePlayer's build scripts and patches in this repository are provided
 under the same license. Each third-party component in `sources/contrib/` is distributed under its own
 license, found in its archive:
 
