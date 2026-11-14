@@ -1,17 +1,26 @@
 # libVLC for DrivePlayer — corresponding source
 
+English | [日本語](README.ja.md)
+
 This repository holds the complete corresponding source of the libVLC library that the DrivePlayer
 Android app ships: `com.example.driveplayer.thirdparty:libvlc-lgpl`, a build of libVLC and its Java
 bindings (libvlcjni) made from sources under the GNU Lesser General Public License 2.1 or more
 permissive licenses only, for arm64-v8a.
 
 Each published build of the library has a tag named after its version (`libvlc-lgpl-<version>`), holding exactly the
-sources, patches and build scripts that produced that build. Two builds matter:
+sources, patches and build scripts that produced that build. Each maintained branch keeps its latest
+published build available as a GitHub Release; older releases remain available too:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-46 | `libvlc-lgpl-3.7.6-46` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
-| 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | `variants` | A build for comparison, which the app does not ship: libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without. The built library is attached to the GitHub release of its tag |
+| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
+| 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
+
+The branches track different recipes and versions independently; their latest releases do not have to share a
+version number. `ogg-libvlc` starts from the existing 3.7.6-37 tag and `naked` from 3.7.6-29-naked. The old
+`variants` branch is retained as historical source; new comparison builds belong on their named branch.
+Existing tags and binary assets retain their original names and contents.
 
 ## Contents
 
@@ -113,6 +122,44 @@ upstream locations. To build from this repository's copies instead:
   patches applied; run the remaining steps of `main` against them.
 - Copy `sources/contrib/*` to `work/tarballs/`. VLC's contrib build uses the archives it finds there and
   verifies each against the SHA-512 it records in `contrib/src/<component>/SHA512SUMS`.
+
+## Maintaining the branches, documentation and releases
+
+Make recipe and patch changes on the branch for that build. This branch (`main`) uses the default recipe;
+the `ogg-libvlc` and `naked` READMEs describe their own versions and build options. Changes shared by all
+branches, such as documentation checks, should be applied to all three without merging their source archives.
+
+English is the default. Update `README.md` together with `README.ja.md`, and `PATCHES.md` together with
+`PATCHES.ja.md`, in the same change. After reviewing the translations, run:
+
+```bash
+python3 scripts/check_docs.py --update
+python3 scripts/check_docs.py
+python3 -m unittest discover -s tests
+```
+
+The check records the English source's SHA-256 in each Japanese document, detects untranslated source
+updates, and checks patch coverage, links and build commands. It does not assess translation quality;
+review both languages before refreshing the hashes. GitHub Actions runs the checks for all three branches.
+
+For a new release, first commit its complete corresponding source on the appropriate branch and tag that
+commit as `libvlc-lgpl-<version>`. Build and verify the binary archive using that tag's recipe and retain the
+archive layout described by the existing release. Publish the archive with that branch as the target:
+
+```bash
+branch=ogg-libvlc # main, ogg-libvlc or naked
+tag='libvlc-lgpl-<version>'
+gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
+    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+```
+
+Replace `<version>` with the actual version (including any variant suffix) before running the command.
+Release notes should identify the branch, source tag, build options, archive contents and SHA-256.
+For `main`, use `--latest=true`; comparison releases use `--latest=false`. Update the branch's entry in
+`.github/release-branches.json` on all three branches, along with both README release tables. Keep at least
+the newest stable release and its binary asset public for each branch; do not delete older releases as part
+of this maintenance. The daily and manual release checks verify publication, assets, branch ancestry and
+that the repository-wide Latest release belongs to `main`.
 
 ## Licenses
 

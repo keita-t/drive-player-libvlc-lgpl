@@ -1,5 +1,7 @@
 # Patches
 
+English | [日本語](PATCHES.ja.md)
+
 DrivePlayer's modifications to libvlcjni and VLC in this build. `third-party/libvlc/patches/libvlcjni/` (5 patches)
 is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (124 patches) to VLC after the patches libvlcjni itself
 carries, all with `git am`. Each patch's message describes its change in full; the tables below say what each one
