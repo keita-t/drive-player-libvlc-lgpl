@@ -1,0 +1,80 @@
+From 33b8ca1931539325afa06fb606a31f72c3542bcb Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 20:08:03 +0900
+Subject: [PATCH 126/126] contrib: fluidlite: take the loop of a compressed
+ sample as a SoundFont 2 sample's
+
+Once FluidLite has decoded a compressed (SF3) sample, it took the sample's
+loop as broken, and replaced it with one from its ninth point to its ninth
+before last, when the loop ended at the point after the sample's last or
+started at the sample's first. A SoundFont 2 sample's loop may do both,
+and FluidLite keeps both for an uncompressed sample. GeneralUser GS
+converted to SF3 had 50 of its 920 loops moved, a grand piano's sustain
+among them. Check a decoded sample's loop as an uncompressed one's is.
+---
+ ...sed-sample-as-a-soundfont-2-sample-s.patch | 40 +++++++++++++++++++
+ contrib/src/fluidlite/rules.mak               |  1 +
+ 2 files changed, 41 insertions(+)
+ create mode 100644 contrib/src/fluidlite/0003-take-the-loop-of-a-compressed-sample-as-a-soundfont-2-sample-s.patch
+
+diff --git a/contrib/src/fluidlite/0003-take-the-loop-of-a-compressed-sample-as-a-soundfont-2-sample-s.patch b/contrib/src/fluidlite/0003-take-the-loop-of-a-compressed-sample-as-a-soundfont-2-sample-s.patch
+new file mode 100644
+index 0000000..41ffc84
+--- /dev/null
++++ b/contrib/src/fluidlite/0003-take-the-loop-of-a-compressed-sample-as-a-soundfont-2-sample-s.patch
+@@ -0,0 +1,40 @@
++From 9bb47489f2ccf10032d18639052ebfdab58ce55a Mon Sep 17 00:00:00 2001
++From: Drive Player <drive-player@localhost>
++Date: Fri, 13 Nov 2026 20:05:16 +0900
++Subject: [PATCH] Take the loop of a compressed sample as a SoundFont 2
++ sample's
++
++Once a compressed (SF3) sample is decoded, its loop was taken as broken,
++and replaced with one from its ninth point to its ninth before last, when
++it ended at the point after the sample's last or started at the sample's
++first. A SoundFont 2 sample's loop may do both: its end is the point after
++its last, and fixup_sample keeps both. GeneralUser GS converted to SF3 had
++50 of its 920 loops moved, a grand piano's sustain among them. Check a
++decoded sample's loop as fixup_sample checks an uncompressed one's.
++---
++ src/fluid_defsfont.c | 8 +++++---
++ 1 file changed, 5 insertions(+), 3 deletions(-)
++
++diff --git a/src/fluid_defsfont.c b/src/fluid_defsfont.c
++index 6481310..b40e89d 100644
++--- a/src/fluid_defsfont.c
+++++ b/src/fluid_defsfont.c
++@@ -649,10 +649,12 @@ fluid_sample_t* fluid_defsfont_get_sample(fluid_defsfont_t* sfont, char *s)
++         sample->start = 0;
++         sample->end = sampleframes - 1;
++ 
++-        /* loop is fowled?? (cluck cluck :) */
++-        if (sample->loopend > sample->end ||
+++        /* loop is fowled?? (cluck cluck :) — read as a SoundFont 2 sample's loop is
+++           (fixup_sample): from its first point up to the point after its last, which may
+++           be the point after the sample's last, and from the sample's first on */
+++        if (sample->loopend > sample->end + 1 ||
++             sample->loopstart >= sample->loopend ||
++-            sample->loopstart <= sample->start) {
+++            sample->loopstart < sample->start) {
++           /* can pad loop by 8 samples and ensure at least 4 for loop (2*8+4) */
++           if ((sample->end - sample->start) >= 20) {
++             sample->loopstart = sample->start + 8;
++-- 
++2.56.0
++
+diff --git a/contrib/src/fluidlite/rules.mak b/contrib/src/fluidlite/rules.mak
+index 09cad9c..5eb6473 100644
+--- a/contrib/src/fluidlite/rules.mak
++++ b/contrib/src/fluidlite/rules.mak
+@@ -24,6 +24,7 @@ fluidlite: fluidlite-$(FLUID_HASH).tar.xz .sum-fluidlite
+ 	$(UNPACK)
+ 	$(APPLY) $(SRC)/fluidlite/0001-pkg-config-add-FLUIDLITE_STATIC-define-when-using-th.patch
+ 	$(APPLY) $(SRC)/fluidlite/0002-count-the-references-to-a-sample-atomically.patch
++	$(APPLY) $(SRC)/fluidlite/0003-take-the-loop-of-a-compressed-sample-as-a-soundfont-2-sample-s.patch
+ 	$(call pkg_static,"fluidlite.pc.in")
+ 	$(MOVE)
+ 
+-- 
+2.56.0
+

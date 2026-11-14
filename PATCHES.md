@@ -1,7 +1,7 @@
 # Patches
 
 DrivePlayer's modifications to libvlcjni and VLC in this build. `third-party/libvlc/patches/libvlcjni/` (5 patches)
-is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (112 patches) to VLC after the patches libvlcjni itself
+is applied to libvlcjni, and `third-party/libvlc/patches/vlc/` (124 patches) to VLC after the patches libvlcjni itself
 carries, all with `git am`. Each patch's message describes its change in full; the tables below say what each one
 solved and what it changes, grouped by what they concern. Numbers missing from the series were removed or not adopted:
 0010 and 0018 are in the tags of earlier versions, and 0020-0024, never built, in this repository's history.
@@ -14,18 +14,19 @@ Back to the [README](README.md).
 
 - [License](#license) (2)
 - [Reading media through the app](#reading-media-through-the-app) (3)
-- [Opening and reading streams](#opening-and-reading-streams) (13)
+- [Opening and reading streams](#opening-and-reading-streams) (15)
 - [Video tracks and the app's window](#video-tracks-and-the-apps-window) (6)
 - [Audio](#audio) (13)
 - [Pause](#pause) (2)
 - [Seeking](#seeking) (17)
 - [Times and lengths](#times-and-lengths) (17)
-- [Elementary video streams](#elementary-video-streams) (8)
+- [Elementary video streams](#elementary-video-streams) (9)
 - [Video size and pixel aspect](#video-size-and-pixel-aspect) (11)
-- [Video output](#video-output) (4)
+- [Video output](#video-output) (5)
 - [Hardware decoders](#hardware-decoders) (5)
-- [FFmpeg's decoders](#ffmpegs-decoders) (10)
+- [FFmpeg's decoders](#ffmpegs-decoders) (11)
 - [Ogg, with libVLC's own demuxer](#ogg-with-libvlcs-own-demuxer) (6)
+- [MIDI and game music](#midi-and-game-music) (7)
 
 ## License
 
@@ -59,6 +60,9 @@ Back to the [README](README.md).
 | [`vlc/0085`](third-party/libvlc/patches/vlc/0085-avcodec-name-signed-8-bit-pcm-laid-out-by-channel.patch) | FFmpeg's demuxers hand CDXL's sound over as signed 8-bit PCM laid out by channel, which no fourcc named: no decoder was found, and the video played silent. | It is named for libavcodec's PCM decoder. |
 | [`vlc/0089`](third-party/libvlc/patches/vlc/0089-avi-read-a-stream-s-chunks-under-a-code-not-listed-when-no-index.patch) | Without an index, a chunk named by a code not listed for its stream's kind (Indeo's `00iv`) was skipped: an AVI cut short of its index played its sound and never a picture. | A chunk of a known stream is taken under any code, as loading an index does. |
 | [`vlc/0090`](third-party/libvlc/patches/vlc/0090-avi-read-a-chunk-found-without-an-index-only-as-its-track-s-next.patch) | Without an index, the walk for a track's next chunk read the first one it found, skipping the chunks it had passed: in a file with an audio preload, the sound jumped ahead and the gaps played as silence. | A chunk found by the walk is read only as the next chunk of a track being read, and only indexed otherwise. |
+| [`vlc/0120`](third-party/libvlc/patches/vlc/0120-mkv-find-the-length-of-a-segment-without-walking-all-its-clusters.patch) | A Matroska segment that states no duration had its length found by walking every element from the first cluster to the end, a seek and a read apart: a two-hour file of some 1,400 clusters written as a live output read for as long as it is long before it could play. | The walk from the last cluster the Cues name stops after eight elements; past that, or without Cues, the end of the segment is read at once (1 MiB, then 4 MiB) and searched in memory for its last whole cluster. A file whose last cluster is not found keeps an unknown length. |
+| [`vlc/0131`](third-party/libvlc/patches/vlc/0131-ps-tell-HEVC-and-MPEG-4-Visual-from-MPEG-video-in-a-stream-with-no-map.patch) | A program stream types its video by its stream map, which FFmpeg never writes: remuxed to .mpg, HEVC and MPEG-4 Visual were taken for MPEG video and showed nothing, MPEG-4 Visual's sequence start code being taken for AVS video's. | With no map, HEVC is told by a base-layer parameter set, delimiter or SEI and MPEG-4 Visual by a visual object sequence or object layer at the start of its data, before AVS video; a packet's data is found after an MPEG-1 header as after an MPEG-2 one. |
+
 
 ## Video tracks and the app's window
 
@@ -152,6 +156,8 @@ Back to the [README](README.md).
 | [`vlc/0094`](third-party/libvlc/patches/vlc/0094-dirac-date-a-stream-timed-by-its-decoding-alone.patch) | The raw Dirac demuxer dates only the first picture's decoding, and the packetizer never dated a picture from it: an elementary Dirac or VC-2 stream showed nothing. | The missing decoding times are counted on from the last one given and kept through an end of sequence, and a picture with no presentation time is presented the modelled reorder delay after its decoding, or as it is decoded in the low delay syntax (VC-2). |
 | [`vlc/0095`](third-party/libvlc/patches/vlc/0095-dirac-packetize-a-raw-stream-again-from-its-start-after-a-seek.patch) | After a seek, the date of the stream's origin went to the end of sequence the packetizer inserts for a discontinuity, and no picture after it was dated. | The packetizer is created anew after a seek, as when the demuxer opens. |
 | [`vlc/0096`](third-party/libvlc/patches/vlc/0096-dirac-keep-the-timestamps-of-the-pictures-an-end-of-sequence-flushes.patch) | An end of sequence gave the timestamps of the last unit put out to the dated pictures too. FFmpeg's VC-2 encoder ends a sequence after each picture, so the stream was never dated. | Only the units the flush finds undated take the previous timestamps. |
+| [`vlc/0127`](third-party/libvlc/patches/vlc/0127-vc1-time-a-picture-by-the-fields-it-shows.patch) | An elementary VC-1 stream was timed a frame per picture: a film coded with 3:2 pulldown, whose pictures repeat a field every other one, played some 20% fast (3.3 s where its fields last 4.1 s). | The sequence header's pulldown flags and each picture's repeated field (RFF) or frames (RPTFRM) are read, and a picture lasts as long as it shows. |
+
 
 ## Video size and pixel aspect
 
@@ -177,6 +183,8 @@ Back to the [README](README.md).
 | [`vlc/0019`](third-party/libvlc/patches/vlc/0019-android-display-crop-public-software-output-to-visible-pixels.patch) | Android's public software windows have no crop API, so coded padding, such as dav1d's aligned AV1 buffers, showed as black margins in stills. | The visible rectangle is negotiated as the window's format and the converter applies the crop, keeping decoder storage, alignment and pool ownership. |
 | [`vlc/0025`](third-party/libvlc/patches/vlc/0025-opengl-convert-full-range-yuv-without-expanding-its-range-again.patch) | The OpenGL output's YUV to RGB matrices expand a limited range. A full-range source, such as MJPEG, was expanded twice, clipping its blacks and whites. | The full-range matrices are chosen when the source is full range. |
 | [`vlc/0114`](third-party/libvlc/patches/vlc/0114-vout-select-the-subtitles-of-a-picture-forced-on-screen-at-the-time-it-is-shown.patch) | The subtitles drawn over a picture are selected at its date. The first picture of a start or a seek is forced on screen while the input still buffers, and its date stood up to the length buffered (0.6 s) past those after it: a subtitle due at the position that reached the output before that picture was shown was judged over and deleted, and a seek inside a cue showed no subtitle until the next cue, at times. | The subtitles of a picture forced on screen while playing are selected at the time it is shown. A paused output still selects them at its pause date. |
+| [`vlc/0128`](third-party/libvlc/patches/vlc/0128-opengl-place-the-picture-in-an-Android-window-s-buffer-at-the-size-it-has-when-drawn.patch) | On Android, a TextureView resizes the window's buffers at once while the OpenGL output places the picture for the new size 25 to 40 ms later and draws in between: a picture drawn at the old place showed a corner magnified, or small in a corner, as the view entered picture-in-picture. | Each picture is drawn at its place scaled to the size the buffer in hand has (`eglQuerySurface`). Sizing the buffers from the output instead does not settle it, a driver taking its next buffer when it chooses. |
+
 
 ## Hardware decoders
 
@@ -202,6 +210,8 @@ Back to the [README](README.md).
 | [`vlc/0065`](third-party/libvlc/patches/vlc/0065-mp4-read-the-color-table-a-palettized-quicktime-picture-describes.patch) | The color table a palettized QuickTime picture carries in its sample description was not read: Apple Graphics (SMC) drew every picture black, and the boxes after the table (`pasp`, `fiel`) were lost. | The table is read into the track's palette, in the layout libavcodec takes, and the boxes after it are read. |
 | [`vlc/0087`](third-party/libvlc/patches/vlc/0087-avparser-packetize-avs-video-split-across-blocks.patch) | The packetizer of FFmpeg's parsers served VP9 alone. AVS video in a program stream comes in packets that end anywhere in a picture, and its decoder, which takes whole pictures, showed none. | It serves AVS video too and puts frames together across blocks, timing a frame by the block it started in. |
 | [`vlc/0107`](third-party/libvlc/patches/vlc/0107-avcodec-time-a-picture-of-an-intra-only-codec-by-its-decoding.patch) | An MP4 track without composition offsets times its samples by their decoding alone, and a codec without a packetizer reaches libavcodec with no presentation time. A decoder that takes its packets itself (APV) then gave its frames no time, and their pictures were dropped: an APV track in MP4 decoded every picture and showed none. | An intra-only codec shows its pictures in the order it decodes them, so a block without a presentation time is handed over with its decoding time as one. |
+| [`vlc/0129`](third-party/libvlc/patches/vlc/0129-avcodec-keep-the-pictures-frame-threads-hold-from-coming-out-too-late.patch) | Frame threads hold a picture until as many packets as there are threads but one follow it. Streams of a few pictures a second (VP3 in NSV, MSN webcam MIMIC) had their pictures come out too late to be shown, and played their sound under a picture standing still. | No frame threads for VP3, Theora and MIMIC; a stream stating its rate uses no more than hold a picture a quarter of a second. |
+
 
 ## Ogg, with libVLC's own demuxer
 
@@ -218,3 +228,17 @@ for the `ogg-libvlc` variant of the recipe, which builds that demuxer with libvo
 | [`vlc/0036`](third-party/libvlc/patches/vlc/0036-ogg-time-flac-packets-by-their-frame-headers.patch) | Ogg times only a page's last packet, and a FLAC page can hold a second. FLAC packets were not interpolated, so after a seek the audio came a second behind its clock and was dropped. | Each FLAC packet is timed by the samples its frame header states, as Vorbis, Opus and Speex packets are. |
 | [`vlc/0037`](third-party/libvlc/patches/vlc/0037-oggseek-read-to-the-end-when-probing-the-length.patch) | The length probe stopped short of a last page that starts before the bytes it read, and took an earlier page's time. | It reads to the end each time and takes the greatest granule. |
 | [`vlc/0116`](third-party/libvlc/patches/vlc/0116-ogg-hold-the-clock-until-each-stream-played-has-had-a-time.patch) | The demuxer gave the lowest PCR among its streams that had a time. In a file of Theora and Vorbis the first Vorbis page comes after the second of pictures it covers: the clock ran on the pictures alone, the buffering ended without the sound, and the sound reached its decoder half a second late. The audio output moved the clock back to it: the time said went back 0.4 s, and the picture stood still 0.6 s about 1.5 s in. | While a selected stream of sound or pictures has had no time, the PCR stays at the timeline's first, as 0083 does for FFmpeg's demuxer, as long as the others are within ten seconds of it. |
+
+## MIDI and game music
+
+This build plays MIDI files with FluidLite, through VLC's `fluidsynth` module and the SoundFont the app gives it, and game consoles' music with Game_Music_Emu, through VLC's `gme` module.
+
+| Patch | Problem | Change |
+|---|---|---|
+| [`vlc/0121`](third-party/libvlc/patches/vlc/0121-smf-keep-the-state-of-the-channels-and-the-notes-sounding-across-a-seek.patch) | A seek flushed the synthesizer, which reset its programs: a MIDI file sought anywhere played on with the piano on every channel, without the controllers, pitch bends and sustain set before, and a note held across the time was not heard. | The file is read from its start on every seek, and the messages that set a channel's state are sent once it lands; the notes sounding at the time start again, but the percussion channel's. |
+| [`vlc/0122`](third-party/libvlc/patches/vlc/0122-fluidsynth-stop-every-voice-and-reset-every-channel-on-a-flush.patch) | A flush released the notes, but a note released under the sustain pedal kept sounding: a file sought with its pedal down played the notes from before the seek under the ones after it, with the reverb ringing on. | A flush resets the synthesizer as a MIDI system reset does: every voice stops, every channel starts over, the effects are cleared. |
+| [`vlc/0123`](third-party/libvlc/patches/vlc/0123-gme-play-every-track-of-a-file-in-turn-from-its-start-only.patch) | Game_Music_Emu played a file's first track until it fell silent, which a looping track never does, and its other tracks were titles whose lengths were reported as the file's. | A file plays as one item, its tracks in turn, each ended as Game_Music_Emu's players end one (its stated length, or its introduction and two loops, or 150 s, then a fade); no length is reported and only a seek to the start is taken. A gzip-compressed VGZ, which has no size, is read up to 16 MiB. |
+| [`vlc/0124`](third-party/libvlc/patches/vlc/0124-contrib-fluidlite-count-the-references-to-a-sample-atomically.patch) | FluidLite counts the voices playing each sample with plain increments: synthesizers sharing a SoundFont on threads of their own lost counts, and a count left above zero kept the SoundFont from being deleted. | The counts are kept atomically. |
+| [`vlc/0125`](third-party/libvlc/patches/vlc/0125-fluidsynth-share-one-SoundFont-among-the-synthesizers-of-the-process.patch) | Each synthesizer loaded the SoundFont into memory of its own, some 90 MB for GeneralUser GS, and a track playing beside the next one made ready held it twice and loaded it twice (three seconds for an SF3 on an SH-02M). | A SoundFont given by path is loaded once for the process, shared by every synthesizer given that path, and deleted when the last one lets go of it. |
+| [`vlc/0126`](third-party/libvlc/patches/vlc/0126-contrib-fluidlite-take-the-loop-of-a-compressed-sample-as-a-SoundFont-2-sample-s.patch) | Once it had decoded a compressed (SF3) sample, FluidLite took a loop ending after the sample's last point or starting at its first as broken and moved it: GeneralUser GS converted to SF3 had 50 of its 920 loops moved, a grand piano's among them. | A decoded sample's loop is checked as an uncompressed one's is. |
+| [`vlc/0130`](third-party/libvlc/patches/vlc/0130-smf-land-a-seek-at-the-time-asked-for-not-at-the-next-event.patch) | A seek read the events up to the time asked for and counted the ticks on from the next event's date: in a file whose events are far apart, a seek landed at the next event, a second or more past the time, and skipped what sounded in between. | The ticks are counted from the time asked for when the next event is later. |

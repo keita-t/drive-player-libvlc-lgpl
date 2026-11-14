@@ -1,0 +1,44 @@
+From e838d68e02dfef74cc9ca48dcf04c9ebc5923f8c Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 14 Nov 2026 22:25:55 +0900
+Subject: [PATCH] smf: land a seek at the time asked for, not at the next event
+
+A seek reads the events up to the time asked for, which leaves the date at
+the next event's, and counted the ticks on from that date. In a file whose
+events are far apart the seek so landed at the next event: asked for its
+first second, a held note whose next event was a change of tempo a second
+later played on from there, and what sounded in between was skipped: the
+first time reported after the seek was 2.15 s. (The notes sounding
+are sent again since "smf: keep the state of the channels and the notes
+sounding across a seek", so they are heard from wherever the ticks begin.)
+
+Count the ticks from the time asked for when the next event is later: the
+events read all stand before it, and the ticks reach the next event's date
+before it is read.
+---
+ modules/demux/smf.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/smf.c b/modules/demux/smf.c
+index 0496c74..7390465 100644
+--- a/modules/demux/smf.c
++++ b/modules/demux/smf.c
+@@ -638,7 +638,14 @@ static int Seek (demux_t *demux, vlc_tick_t pts)
+     }
+ 
+     sys->pulse = pulse;
+-    sys->tick = ((date_Get (&sys->pts) - VLC_TICK_0) / TICK) * TICK + VLC_TICK_0;
++    /* The ticks go on from the time asked for. The events read all stand
++     * before it, and the date is that of the next one, which a file with few
++     * events has seconds later: counted from there, the seek landed at the
++     * next event and what sounds until then was skipped. */
++    vlc_tick_t from = date_Get (&sys->pts);
++    if (pts + VLC_TICK_0 < from)
++        from = pts + VLC_TICK_0;
++    sys->tick = ((from - VLC_TICK_0) / TICK) * TICK + VLC_TICK_0;
+ 
+     while (replay != NULL)
+     {
+-- 
+2.56.0
+

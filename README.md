@@ -10,7 +10,7 @@ sources, patches and build scripts that produced that build. Two builds matter:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-43 | `libvlc-lgpl-3.7.6-43` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-46 | `libvlc-lgpl-3.7.6-46` | `main` | The build the app ships, with the patches listed in [PATCHES.md](PATCHES.md). The built library is attached to the GitHub release of its tag |
 | 3.7.6-29-naked | `libvlc-lgpl-3.7.6-29-naked` | `variants` | A build for comparison, which the app does not ship: libVLC as upstream makes it, in this build's LGPL-only configuration, with only the patches the app cannot run without. The built library is attached to the GitHub release of its tag |
 
 ## Contents
@@ -19,7 +19,7 @@ sources, patches and build scripts that produced that build. Two builds matter:
 |---|---|
 | `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with DrivePlayer's patches applied |
 | `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and DrivePlayer's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
-| `sources/contrib/` | The source archives of the 26 third-party components linked into `libvlc.so`, as published by each project |
+| `sources/contrib/` | The source archives of the 28 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
 | `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
 | `third-party/libvlc/patches/` | DrivePlayer's modifications to libvlcjni and VLC, as `git am` patches |
@@ -48,7 +48,7 @@ it carries source patches for behaviour the app relies on.
 
 ### Patches
 
-`patches/libvlcjni/` (5 patches) is applied to libvlcjni, and `patches/vlc/` (112 patches) to VLC after the patches
+`patches/libvlcjni/` (5 patches) is applied to libvlcjni, and `patches/vlc/` (124 patches) to VLC after the patches
 libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
 change it makes:
 
@@ -56,18 +56,19 @@ change it makes:
 |---|---|
 | [License](PATCHES.md#license) | 2 |
 | [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 3 |
-| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 13 |
+| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 15 |
 | [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 6 |
 | [Audio](PATCHES.md#audio) | 13 |
 | [Pause](PATCHES.md#pause) | 2 |
 | [Seeking](PATCHES.md#seeking) | 17 |
 | [Times and lengths](PATCHES.md#times-and-lengths) | 17 |
-| [Elementary video streams](PATCHES.md#elementary-video-streams) | 8 |
+| [Elementary video streams](PATCHES.md#elementary-video-streams) | 9 |
 | [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 11 |
-| [Video output](PATCHES.md#video-output) | 4 |
+| [Video output](PATCHES.md#video-output) | 5 |
 | [Hardware decoders](PATCHES.md#hardware-decoders) | 5 |
-| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 10 |
+| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 11 |
 | [Ogg, with libVLC's own demuxer](PATCHES.md#ogg-with-libvlcs-own-demuxer) (`ogg-libvlc` variant only, but for 0032) | 6 |
+| [MIDI and game music](PATCHES.md#midi-and-game-music) | 7 |
 
 ## Build
 
@@ -122,7 +123,7 @@ license, found in its archive:
 
 | License | Components |
 |---|---|
-| GNU LGPL 2.1 or later | FFmpeg, libdvbpsi, libebml, libmatroska, GNU FriBidi, GNU libiconv, libplacebo, libsoxr, mpg123 |
+| GNU LGPL 2.1 or later | FFmpeg, libdvbpsi, libebml, libmatroska, GNU FriBidi, GNU libiconv, libplacebo, libsoxr, mpg123, FluidLite, Game_Music_Emu (built with its LGPL Nuked YM2612 emulator; the GPL MAME emulator in its archive is not built) |
 | BSD 2-Clause | dav1d, OpenJPEG |
 | BSD 3-Clause | libogg, libtheora, libvpx, libFLAC, Opus, Speex |
 | MIT | HarfBuzz ("Old MIT"), libxml2 |
@@ -133,6 +134,7 @@ license, found in its archive:
 | zlib License | zlib |
 | Boost Software License 1.0 | UTF8-CPP |
 | GSM license (permissive) | libgsm |
+| Public domain or MIT | stb_vorbis, inside FluidLite's archive |
 
 The Android app links libVLC only as these shared libraries (`libvlc.so`, `libvlcjni.so`) through the
 libvlcjni Java API, so a modified build made from these sources can take their place.

@@ -1,0 +1,91 @@
+From 0ba1a869e8f528b791314e51cb734c86f43f9696 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 14 Nov 2026 01:30:36 +0900
+Subject: [PATCH] avcodec: keep the pictures frame threads hold from coming out
+ too late
+
+Frame threads hold a picture until as many packets as there are threads
+but one have followed it: six threads, five packets. At 24 pictures a
+second or more that is a fifth of a second, within what the input buffers.
+A stream whose pictures come further apart had them come out of the
+decoder too late to be shown: an NSV file of VP3 at 5 frames a second,
+nearly half of its frames without a picture where the picture does not
+change, and an MSN webcam session of MIMIC, a picture a second or so,
+played their sound with the picture standing still, and showed their
+last few pictures at the end, as the decoder was drained.
+
+Use no frame threads for VP3 (and Theora, its successor), which NSV
+leaves frames without, nor for MIMIC, a webcam's. For a stream stating its
+frame rate, use no more frame threads than hold a picture a quarter of a
+second, as 24 pictures a second do with as many as before; slower streams
+use fewer, and one stating less than 6 pictures a second is decoded with
+low delay, which uses none.
+---
+ modules/codec/avcodec/video.c | 40 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 802f613..aae08b4 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -409,6 +409,9 @@ static bool lavc_KeptLentPlanes(const AVFrame *frame, const picture_t *pic)
+     return true;
+ }
+ 
++/* How late a picture frame threads hold may come out of the decoder, in ms */
++#define FRAME_THREAD_DELAY_MS 250
++
+ static int OpenVideoCodec( decoder_t *p_dec )
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+@@ -596,10 +599,47 @@ static int InitVideoDecCommon( decoder_t *p_dec )
+         case AV_CODEC_ID_WMV3:
+             p_context->thread_type &= ~FF_THREAD_FRAME;
+ # endif
++        /* A picture of these may come long after the one before: NSV
++         * leaves its frames without a picture where the picture does not
++         * change (VP3), and a webcam session sends one a second or so
++         * (MIMIC). Frame threads hold a picture until as many packets as
++         * there are threads but one have followed it, which there took
++         * seconds: the pictures came out too late to be shown, and only the
++         * last ones were, at the end. */
++        case AV_CODEC_ID_VP3:
++        case AV_CODEC_ID_THEORA:
++        case AV_CODEC_ID_MIMIC:
++            p_context->thread_type &= ~FF_THREAD_FRAME;
++            break;
+         default:
+             break;
+     }
+ 
++    /* The pictures a frame thread holds are those many packets late: at the
++     * frame rate the stream states, keep that within a quarter of a second,
++     * which 24 pictures a second do with as many threads as before, and use
++     * no frame threads where even one more would not (a stream stating less
++     * than 6 pictures a second is decoded with low delay, which uses none
++     * either). */
++    if( (p_codec->capabilities & AV_CODEC_CAP_FRAME_THREADS)
++     && (p_context->thread_type & FF_THREAD_FRAME)
++     && p_dec->fmt_in.video.i_frame_rate > 0
++     && p_dec->fmt_in.video.i_frame_rate_base > 0 )
++    {
++        const uint64_t i_max_threads = 1 +
++            (uint64_t)p_dec->fmt_in.video.i_frame_rate * FRAME_THREAD_DELAY_MS /
++            (UINT64_C(1000) * p_dec->fmt_in.video.i_frame_rate_base);
++        if( i_max_threads < 2 )
++            p_context->thread_type &= ~FF_THREAD_FRAME;
++        else if( (uint64_t)p_context->thread_count > i_max_threads )
++        {
++            msg_Dbg( p_dec, "frame threads limited to %"PRIu64" at %u/%u pictures a second",
++                     i_max_threads, p_dec->fmt_in.video.i_frame_rate,
++                     p_dec->fmt_in.video.i_frame_rate_base );
++            p_context->thread_count = i_max_threads;
++        }
++    }
++
+     if( p_context->thread_type & FF_THREAD_FRAME )
+         p_dec->i_extra_picture_buffers = 2 * p_context->thread_count;
+ 
+-- 
+2.56.0
+

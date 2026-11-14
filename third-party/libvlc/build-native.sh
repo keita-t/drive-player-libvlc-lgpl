@@ -96,11 +96,19 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 #   libxml2                         the Android font list the text renderer reads, and TTML
 #   jpeg                            linked by libvlcjni's own Android.mk
 #   libplacebo                      the OpenGL output's color conversion and tone mapping
+#   fluidlite                       MIDI, through VLC's fluidsynth module, which synthesizes the
+#                                   notes VLC's smf demuxer reads with the SoundFont the app gives it
+#                                   (`soundfont`). Built for SF3, whose Vorbis-compressed samples it
+#                                   decodes with the stb_vorbis it carries (public domain or MIT):
+#                                   no libvorbis, whose decoding FluidLite does through a static
+#                                   buffer two synthesizers loading at once would share
+#   gme (+ zlib)                    chiptune formats (NSF, SPC, GBS, VGM and VGZ, ...), emulated by
+#                                   game-music-emu; its YM2612 emulator is the LGPL Nuked
 # fontconfig is deliberately absent: without it, the text renderer reads Android's font list
 # instead of scanning every system font on first use.
 contrib_packages=(
-    ass dav1d dvbpsi ebml ffmpeg flac freetype2 fribidi gsm harfbuzz iconv jpeg libplacebo
-    libxml2 matroska mpg123 ogg openjpeg opus png soxr speex theora utfcpp vpx zlib
+    ass dav1d dvbpsi ebml ffmpeg flac fluidlite freetype2 fribidi gme gsm harfbuzz iconv jpeg
+    libplacebo libxml2 matroska mpg123 ogg openjpeg opus png soxr speex theora utfcpp vpx zlib
 )
 
 # VLC's own configure switches. Everything that would need a contrib outside the list above is
@@ -118,10 +126,10 @@ vlc_configure_args=(
     --enable-matroska --enable-dvbpsi --enable-mpg123 --enable-libass --enable-libxml2
     --enable-gles2 --enable-jpeg
     # Upstream enables these; this build leaves them out. Stream output (transcoding, recording,
-    # casting), Lua scripts, tag reading, discs, tracker and chiptune formats, teletext through
-    # zvbi, MIDI, and the network shares.
+    # casting), Lua scripts, tag reading, discs, tracker formats, teletext through zvbi, and the
+    # network shares.
     --disable-sout --disable-lua --disable-taglib --disable-bluray --disable-dvdread
-    --disable-dvdnav --disable-mod --disable-gme --disable-zvbi --disable-fluidlite
+    --disable-dvdnav --disable-mod --disable-zvbi
     --disable-smb2 --disable-live555
     # Further features off: fontconfig (see contrib_packages), the AV1 module of libaom (dav1d
     # and FFmpeg decode AV1), archives, discovery, remote access, TLS and credential stores, and
@@ -132,9 +140,11 @@ vlc_configure_args=(
     --disable-libgcrypt --disable-secret --disable-kwallet --disable-avahi --disable-realrtsp
     --disable-addonmanagermodules --disable-shout --disable-twolame --disable-shine
     --disable-x264 --disable-kate --disable-tiger --disable-libcddb
-    # The contribs above, required rather than detected.
+    # The contribs above, required rather than detected. FluidLite builds VLC's fluidsynth module
+    # (FluidSynth itself, which needs GLib, stays off above).
     --enable-dav1d --enable-flac --enable-speex --enable-ogg --enable-theora --enable-vpx --enable-soxr
     --enable-freetype --enable-fribidi --enable-harfbuzz --enable-png --enable-libplacebo
+    --enable-fluidlite --enable-gme
 )
 
 # Modules built but not linked, as extended regular expressions over the module name (the part of
@@ -168,7 +178,7 @@ module_blacklist=(
     # time seek, where FFmpeg's reads the timestamps.
     pva
     # Playlist files, external subtitle files and the video filters nothing enables.
-    playlist subtitle vobsub stl smf canvas croppadd fps freeze gaussianblur gradfun extract
+    playlist subtitle vobsub stl canvas croppadd fps freeze gaussianblur gradfun extract
     invert colorthres edgedetection anaglyph antiflicker sepia oldmovie vhs logo marq subsdelay
     vmem
     # Audio effects nothing enables, and S/PDIF passthrough.
@@ -362,8 +372,14 @@ RANLIB=${CROSS_TOOLS}ranlib
 LD=${CROSS_TOOLS}ld
 EOF
 
-    # libass's rules force fontconfig on Android; a command-line value overrides the makefile's.
-    local contrib_make=(make --no-print-directory -C "$CONTRIB_BUILD_DIR" TARBALLS="$TARBALLS_DIR" WITH_FONTCONFIG=0)
+    # A command-line value overrides the makefile's:
+    #  - libass's rules force fontconfig on Android;
+    #  - FluidLite decodes SF3 with its own stb_vorbis, without the libvorbis its rules depend on;
+    #  - game-music-emu's YM2612 emulator is named, so that a change of its default to the GPL
+    #    MAME one cannot slip in (the GPL guard does not see a contrib's own build options).
+    local contrib_make=(make --no-print-directory -C "$CONTRIB_BUILD_DIR" TARBALLS="$TARBALLS_DIR" WITH_FONTCONFIG=0
+        DEPS_fluidlite= "FLUIDLITE_CONF=-DENABLE_SF3=ON -DSTB_VORBIS=ON"
+        "GME_CONF=-DENABLE_UBSAN=OFF -DGME_YM2612_EMU=Nuked")
 
     "${contrib_make[@]}" list | tee "$OUT_DIR/contrib-list.txt"
     local resolved expected
@@ -527,6 +543,21 @@ verify_ffmpeg_license() {
     done
     grep -qxF '#define FFMPEG_LICENSE "LGPL version 2.1 or later"' "$config" ||
         die "FFmpeg does not report LGPL 2.1 or later."
+}
+
+# The contribs whose build options decide their license or what they depend on, as contrib_make
+# configured them: game-music-emu with the LGPL Nuked YM2612 emulator rather than the GPL MAME one,
+# and FluidLite reading SF3 with its own stb_vorbis rather than with libvorbis.
+verify_contrib_options() {
+    log "Verifying the contribs' build options"
+    local gme="$CONTRIB_BUILD_DIR/game-music-emu/vlc_build/CMakeCache.txt"
+    local fluidlite="$CONTRIB_BUILD_DIR/fluidlite/vlc_build/CMakeCache.txt"
+    [ -f "$gme" ] || die "game-music-emu's CMake cache is not at $gme"
+    grep -qE '^GME_YM2612_EMU(:[A-Z]+)?=Nuked$' "$gme" ||
+        die "game-music-emu was not configured with the Nuked YM2612 emulator."
+    [ -f "$fluidlite" ] || die "FluidLite's CMake cache is not at $fluidlite"
+    grep -qE '^ENABLE_SF3(:[A-Z]+)?=ON$' "$fluidlite" || die "FluidLite was configured without SF3."
+    grep -qE '^STB_VORBIS(:[A-Z]+)?=ON$' "$fluidlite" || die "FluidLite was configured to decode SF3 with libvorbis."
 }
 
 collect_outputs() {
@@ -783,6 +814,7 @@ build_fully() {
     build_tools
     build_contribs
     verify_ffmpeg_license
+    verify_contrib_options
     build_vlc
     generate_module_table
     link_libraries

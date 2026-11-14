@@ -1,0 +1,682 @@
+From 40aa8716f206ac5325a3f8739017d56e3795fb37 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 17:58:12 +0900
+Subject: [PATCH] mkv: find the length of a segment without walking all its
+ clusters
+
+A segment that states no duration has its length found when it is opened,
+from the time of the last block of its last cluster. Without Cues, the last
+cluster was found by walking every top-level element from the first
+cluster to the end, each a seek and a read of the input apart. A two-hour,
+2.8 GB file written by FFmpeg as a live output, with some 1,400 clusters,
+had its open read for as long as the file is long, past what a still of
+its start may cost. With Cues, the walk starts at the last cluster they
+name, but goes on unbounded too.
+
+Walk from the last cluster the Cues name for eight elements at most. Past
+that, or without Cues, read the end of the segment's data at once, in a
+step of 1 MiB and, when that holds no last cluster, of 4 MiB, and search
+it for the last cluster in memory: going back from the end, over every
+place a cluster's ID is, take the first cluster whose children are a
+cluster's, its timestamp first and at least one block of the segment's
+tracks, whose elements after it reach the end of the data exactly and
+include no cluster, and which no attachments or tags element that starts
+before it holds. Where the file ends before its segment says it does, or
+the segment's size is unknown, the element the end cuts is taken as far
+as it goes; a cluster cut before its first whole block ends at its own
+timestamp. A file whose last cluster is not found that way keeps an
+unknown length rather than a wrong one, and is played as before. A
+cluster of unknown size, which made the walk give up at once, is read up
+to the next element of the segment.
+
+The duration of a block group is in the segment's ticks: scale it as the
+block's time is scaled.
+---
+ modules/demux/mkv/matroska_segment.cpp | 581 +++++++++++++++++++++++--
+ modules/demux/mkv/matroska_segment.hpp |   2 +
+ 2 files changed, 543 insertions(+), 40 deletions(-)
+
+diff --git a/modules/demux/mkv/matroska_segment.cpp b/modules/demux/mkv/matroska_segment.cpp
+index 5905e92..fbd2db6 100644
+--- a/modules/demux/mkv/matroska_segment.cpp
++++ b/modules/demux/mkv/matroska_segment.cpp
+@@ -1015,6 +1015,427 @@ void matroska_segment_c::ComputeTrackPriority()
+     }
+ }
+ 
++namespace
++{
++
++/* How much of the end of a segment's data EnsureDuration reads to find its last
++ * cluster, in the steps it reads it in. A muxer closes a cluster after a few
++ * seconds or megabytes, so the last one usually starts in the first step;
++ * the second leaves room for one at a high bitrate. Never more: a file whose
++ * last cluster is larger keeps an unknown length, rather than having the
++ * search grow towards reading the whole file. */
++const uint64_t tail_steps[] = { UINT64_C(1) << 20, UINT64_C(4) << 20 };
++
++/* How many top-level elements EnsureDuration walks from the last cluster the
++ * Cues name before it looks at the end of the data instead. Cues name every
++ * cluster with a key frame, so few clusters follow the last one they name;
++ * each element walked is a seek and a read. */
++const unsigned cues_walk_elements = 8;
++
++/* The EBML IDs the search of the end of the data reads, as they are written:
++ * with the bits that mark their length. */
++enum : uint32_t
++{
++    ID_EBML_VOID          = 0xEC,
++    ID_EBML_CRC32         = 0xBF,
++    /* the segment's children */
++    ID_SEEKHEAD           = 0x114D9B74,
++    ID_INFO               = 0x1549A966,
++    ID_TRACKS             = 0x1654AE6B,
++    ID_CLUSTER            = 0x1F43B675,
++    ID_CUES               = 0x1C53BB6B,
++    ID_ATTACHMENTS        = 0x1941A469,
++    ID_CHAPTERS           = 0x1043A770,
++    ID_TAGS               = 0x1254C367,
++    /* a cluster's children */
++    ID_TIMESTAMP          = 0xE7,
++    ID_SILENTTRACKS       = 0x5854,
++    ID_POSITION           = 0xA7,
++    ID_PREVSIZE           = 0xAB,
++    ID_SIMPLEBLOCK        = 0xA3,
++    ID_BLOCKGROUP         = 0xA0,
++    ID_ENCRYPTEDBLOCK     = 0xAF,
++    /* a block group's children */
++    ID_BLOCK              = 0xA1,
++    ID_BLOCKVIRTUAL       = 0xA2,
++    ID_BLOCKADDITIONS     = 0x75A1,
++    ID_BLOCKDURATION      = 0x9B,
++    ID_REFERENCEPRIORITY  = 0xFA,
++    ID_REFERENCEBLOCK     = 0xFB,
++    ID_REFERENCEVIRTUAL   = 0xFD,
++    ID_CODECSTATE         = 0xA4,
++    ID_DISCARDPADDING     = 0x75A2,
++    ID_SLICES             = 0x8E,
++    ID_REFERENCEFRAME     = 0xC8,
++    /* the first children of attachments and tags */
++    ID_ATTACHEDFILE       = 0x61A7,
++    ID_TAG                = 0x7373,
++};
++
++/* The last cluster of a segment, searched for in a buffer that holds the end of
++ * the segment's data.
++ *
++ * The buffer starts anywhere, in the middle of an element as likely as not, so
++ * where a cluster starts is known only by its ID's four bytes, which may as well
++ * be a coincidence in a frame's data, or a cluster of a Matroska file attached
++ * to this one. The search therefore goes back from the end over every place
++ * those bytes are and takes the first one that proves to be the last cluster:
++ *  - its children are a cluster's, each of a known size, within the cluster:
++ *    first its timestamp, then blocks of the segment's tracks, at least one;
++ *  - what follows it is the segment's other top-level elements, but no
++ *    cluster, each of a known size, up to the end of the data exactly — so a
++ *    cluster that has another one after it is not taken for the last;
++ *  - it lies in no attachments or tags element that starts before it.
++ * A file cut short ends in the middle of an element: when the end of the data
++ * is the end of a file shorter than its segment says, or of a segment of
++ * unknown size, the element the end cuts is taken as far as it goes, and a
++ * cut block does not count. A cluster cut before its first whole block ends at
++ * its own timestamp, which no block before it passes by more than a frame.
++ *
++ * Nothing here reads beyond the buffer, and every loop advances by at least
++ * one byte, so a damaged or hostile file costs at most a few passes over it. */
++class TailCluster
++{
++public:
++    /* `tracks` are the segment's track numbers, sorted; `cut` whether the end
++     * of the buffer may cut an element. */
++    TailCluster( const uint8_t *p, size_t n, bool cut, const std::vector<uint64_t> &tracks )
++        : p( p ), n( n ), cut( cut ), tracks( tracks ) {}
++
++    /* The time of the end of the last block of the last cluster, in the
++     * segment's ticks. */
++    bool LastTime( uint64_t *ticks ) const
++    {
++        if( n < 4 )
++            return false;
++        std::vector<Range> hidden = Containers();
++        for( size_t pos = n - 4 + 1; pos-- > 0; )
++        {
++            if( p[pos] != 0x1F || p[pos + 1] != 0x43 || p[pos + 2] != 0xB6 || p[pos + 3] != 0x75 )
++                continue;
++            bool contained = false;
++            for( const Range & r : hidden )
++                contained = contained || ( r.start < pos && pos < r.end );
++            if( !contained && ClusterTime( pos, ticks ) )
++                return true;
++        }
++        return false;
++    }
++
++private:
++    struct Element
++    {
++        uint32_t id;
++        size_t   data;    /* where its data starts */
++        uint64_t size;    /* the size of its data, unless unknown */
++        bool     unknown;
++
++        uint64_t End() const { return data + size; }
++    };
++
++    struct Range
++    {
++        size_t   start;
++        uint64_t end;
++    };
++
++    enum Read { READ_OK, READ_SHORT, READ_INVALID };
++
++    /* An EBML variable-size integer of up to `max` bytes: its value without
++     * the bits that mark its length, and whether every bit of the value is set
++     * (an unknown size). */
++    Read Vint( size_t pos, size_t max, uint64_t *value, size_t *len, bool *all_set ) const
++    {
++        if( pos >= n )
++            return READ_SHORT;
++        uint8_t first = p[pos];
++        size_t l = 1;
++        while( l <= max && !( first & ( 0x100 >> l ) ) )
++            l++;
++        if( l > max )
++            return READ_INVALID;
++        if( l > n - pos )
++            return READ_SHORT;
++        uint64_t v = first & ( 0xFF >> l );
++        bool all = v == ( 0xFFu >> l );
++        for( size_t i = 1; i < l; i++ )
++        {
++            v = v << 8 | p[pos + i];
++            all = all && p[pos + i] == 0xFF;
++        }
++        *value = v;
++        *len = l;
++        *all_set = all;
++        return READ_OK;
++    }
++
++    /* An element's ID and size at pos. */
++    Read Header( size_t pos, Element *e ) const
++    {
++        uint64_t value;
++        size_t id_len, size_len;
++        bool all_set;
++        Read r = Vint( pos, 4, &value, &id_len, &all_set );
++        if( r != READ_OK )
++            return r;
++        if( all_set ) /* reserved */
++            return READ_INVALID;
++        e->id = 0;
++        for( size_t i = 0; i < id_len; i++ )
++            e->id = e->id << 8 | p[pos + i];
++        r = Vint( pos + id_len, 8, &e->size, &size_len, &e->unknown );
++        if( r != READ_OK )
++            return r;
++        e->data = pos + id_len + size_len;
++        return READ_OK;
++    }
++
++    static bool IsTopLevel( uint32_t id )
++    {
++        switch( id )
++        {
++            case ID_SEEKHEAD: case ID_INFO: case ID_TRACKS: case ID_CLUSTER:
++            case ID_CUES: case ID_ATTACHMENTS: case ID_CHAPTERS: case ID_TAGS:
++            case ID_EBML_VOID: case ID_EBML_CRC32:
++                return true;
++        }
++        return false;
++    }
++
++    static bool IsClusterChild( uint32_t id )
++    {
++        switch( id )
++        {
++            case ID_TIMESTAMP: case ID_SILENTTRACKS: case ID_POSITION: case ID_PREVSIZE:
++            case ID_SIMPLEBLOCK: case ID_BLOCKGROUP: case ID_ENCRYPTEDBLOCK:
++            case ID_EBML_VOID: case ID_EBML_CRC32:
++                return true;
++        }
++        return false;
++    }
++
++    static bool IsBlockGroupChild( uint32_t id )
++    {
++        switch( id )
++        {
++            case ID_BLOCK: case ID_BLOCKVIRTUAL: case ID_BLOCKADDITIONS: case ID_BLOCKDURATION:
++            case ID_REFERENCEPRIORITY: case ID_REFERENCEBLOCK: case ID_REFERENCEVIRTUAL:
++            case ID_CODECSTATE: case ID_DISCARDPADDING: case ID_SLICES: case ID_REFERENCEFRAME:
++            case ID_EBML_VOID: case ID_EBML_CRC32:
++                return true;
++        }
++        return false;
++    }
++
++    uint64_t UInt( const Element & e ) const
++    {
++        uint64_t v = 0;
++        for( size_t i = 0; i < e.size; i++ )
++            v = v << 8 | p[e.data + i];
++        return v;
++    }
++
++    /* The extents of the attachments and tags elements that start in the
++     * buffer, whose data may hold anything, a cluster's ID included. An element
++     * counts only if its first child (past any CRC or void) is an attached file
++     * or a tag, so a coincidence of the four bytes rarely hides a cluster. */
++    std::vector<Range> Containers() const
++    {
++        std::vector<Range> found;
++        for( size_t pos = 0; pos + 4 <= n; pos++ )
++        {
++            if( p[pos] != 0x19 && p[pos] != 0x12 )
++                continue;
++            Element e, child;
++            if( Header( pos, &e ) != READ_OK || ( e.id != ID_ATTACHMENTS && e.id != ID_TAGS ) )
++                continue;
++            size_t q = e.data;
++            while( Header( q, &child ) == READ_OK && !child.unknown
++                && ( child.id == ID_EBML_CRC32 || child.id == ID_EBML_VOID )
++                && child.End() < n )
++                q = child.End();
++            if( Header( q, &child ) != READ_OK
++             || child.id != ( e.id == ID_ATTACHMENTS ? ID_ATTACHEDFILE : ID_TAG ) )
++                continue;
++            found.push_back( Range{ pos, e.unknown ? UINT64_MAX : e.End() } );
++        }
++        return found;
++    }
++
++    /* The time of a block's start: its cluster's timestamp and its own
++     * offset, after the number of a track of the segment. */
++    bool BlockTime( const Element & block, uint64_t cluster_time, uint64_t *ticks ) const
++    {
++        uint64_t track;
++        size_t len;
++        bool all_set;
++        if( Vint( block.data, 8, &track, &len, &all_set ) != READ_OK
++         || block.size < len + 3
++         || !std::binary_search( tracks.begin(), tracks.end(), track ) )
++            return false;
++        int16_t offset = static_cast<int16_t>( p[block.data + len] << 8 | p[block.data + len + 1] );
++        *ticks = offset < 0 && cluster_time < static_cast<uint64_t>( -offset )
++               ? 0 : cluster_time + offset;
++        return true;
++    }
++
++    /* The time of the end of a block group's block: its start and its duration. */
++    bool GroupTime( const Element & group, uint64_t cluster_time, uint64_t *ticks ) const
++    {
++        bool have_block = false;
++        uint64_t start = 0, duration = 0;
++        for( size_t q = group.data; q < group.End(); )
++        {
++            Element e;
++            if( Header( q, &e ) != READ_OK || e.unknown || e.End() > group.End()
++             || !IsBlockGroupChild( e.id ) )
++                return false;
++            if( e.id == ID_BLOCK )
++            {
++                if( have_block || !BlockTime( e, cluster_time, &start ) )
++                    return false;
++                have_block = true;
++            }
++            else if( e.id == ID_BLOCKDURATION )
++            {
++                if( e.size > 8 )
++                    return false;
++                duration = UInt( e );
++            }
++            q = e.End();
++        }
++        if( !have_block )
++            return false;
++        *ticks = start + duration;
++        return true;
++    }
++
++    /* Whether the segment's top-level elements from pos reach the end of the
++     * data, and no cluster is among them. */
++    bool EndsTheData( size_t pos ) const
++    {
++        while( pos < n )
++        {
++            Element e;
++            Read r = Header( pos, &e );
++            if( r != READ_OK )
++                return r == READ_SHORT && cut;
++            if( !IsTopLevel( e.id ) || e.id == ID_CLUSTER || e.unknown )
++                return false;
++            if( e.End() > n )
++                return cut;
++            pos = e.End();
++        }
++        return true;
++    }
++
++    /* The time of the end of the cluster at pos, if it is the last one. */
++    bool ClusterTime( size_t pos, uint64_t *ticks ) const
++    {
++        Element c;
++        if( Header( pos, &c ) != READ_OK || c.id != ID_CLUSTER )
++            return false;
++
++        /* Where its children end, and whether the end of the data may cut one. */
++        uint64_t end;
++        bool cut_here;
++        if( c.unknown )
++        {
++            end = n;
++            cut_here = cut;
++        }
++        else if( c.End() > n )
++        {
++            if( !cut )
++                return false;
++            end = n;
++            cut_here = true;
++        }
++        else
++        {
++            end = c.End();
++            cut_here = false;
++        }
++
++        bool have_time = false, have_block = false;
++        uint64_t cluster_time = 0, last = 0;
++        size_t q = c.data;
++        while( q < end )
++        {
++            Element e;
++            Read r = Header( q, &e );
++            if( r == READ_SHORT && cut_here )
++                break;
++            if( r != READ_OK )
++                return false;
++            /* A cluster of unknown size ends where an element of the segment starts. */
++            if( c.unknown && IsTopLevel( e.id ) && !IsClusterChild( e.id ) )
++            {
++                end = q;
++                break;
++            }
++            if( !IsClusterChild( e.id ) || e.unknown )
++                return false;
++            if( e.End() > end )
++            {
++                if( !cut_here )
++                    return false;
++                break;
++            }
++
++            uint64_t t;
++            if( !have_time )
++            {
++                if( e.id == ID_TIMESTAMP )
++                {
++                    if( e.size > 8 )
++                        return false;
++                    cluster_time = UInt( e );
++                    have_time = true;
++                }
++                else if( e.id != ID_EBML_CRC32 && e.id != ID_EBML_VOID )
++                    return false;
++            }
++            else if( e.id == ID_TIMESTAMP )
++                return false;
++            else if( e.id == ID_SIMPLEBLOCK )
++            {
++                if( !BlockTime( e, cluster_time, &t ) )
++                    return false;
++                last = have_block ? std::max( last, t ) : t;
++                have_block = true;
++            }
++            else if( e.id == ID_BLOCKGROUP )
++            {
++                if( !GroupTime( e, cluster_time, &t ) )
++                    return false;
++                last = have_block ? std::max( last, t ) : t;
++                have_block = true;
++            }
++            q = e.End();
++        }
++        /* A cluster that ends with the data where the data may be cut. */
++        bool cut_off = cut_here && end == n;
++        if( !have_block )
++        {
++            if( !cut_off || !have_time )
++                return false;
++            last = cluster_time;
++        }
++        if( end < n && !EndsTheData( end ) )
++            return false;
++        *ticks = last;
++        return true;
++    }
++
++    const uint8_t *p;
++    size_t n;
++    bool cut;
++    const std::vector<uint64_t> &tracks;
++};
++
++} // namespace
++
+ void matroska_segment_c::EnsureDuration()
+ {
+     if ( i_duration > 0 )
+@@ -1032,27 +1453,51 @@ void matroska_segment_c::EnsureDuration()
+     }
+ 
+     uint64 i_current_position = es.I_O().getFilePointer();
+-    uint64 i_last_cluster_pos = cluster->GetElementPosition();
+ 
+-    // find the last Cluster from the Cues
++    /* The length runs from the first cluster to the end of the last block. The
++     * last cluster is found from the last one the Cues name, when the end of
++     * the data is a few elements on, or else in the end of the data, which is
++     * read at once. Neither walks the clusters from the first one: a long file
++     * without Cues has thousands of them, each a seek and a read apart, and
++     * opening it would read for as long as the file is long. */
++    uint64 i_last_timecode;
++    if( ( LastTimecodeFromCues( &i_last_timecode ) || LastTimecodeAtTail( &i_last_timecode ) )
++     && i_last_timecode > cluster->GlobalTimecode() )
++    {
++        i_duration = ( i_last_timecode - cluster->GlobalTimecode() ) / INT64_C(1000000);
++        msg_Dbg( &sys.demuxer, " extracted Duration=%" PRId64, i_duration );
++    }
++    else
++        msg_Dbg( &sys.demuxer, "could not find the segment duration" );
+ 
+-    if ( b_cues && _seeker._cluster_positions.size() )
+-        i_last_cluster_pos = *_seeker._cluster_positions.rbegin();
+-    else if( !cluster->IsFiniteSize() )
+-        return;
++    // get back to the reading position we were at before looking for a duration
++    es.I_O().setFilePointer( i_current_position, seek_beginning );
++}
++
++bool matroska_segment_c::LastTimecodeFromCues( uint64 *pi_last_timecode )
++{
++    if( !b_cues || _seeker._cluster_positions.empty() )
++        return false;
++
++    uint64 i_last_cluster_pos = *_seeker._cluster_positions.rbegin();
+ 
+     es.I_O().setFilePointer( i_last_cluster_pos, seek_beginning );
+ 
+     EbmlParser eparser ( &es, segment, &sys.demuxer );
+ 
+-    // locate the definitely last cluster in the stream
++    // locate the definitely last cluster in the stream, a few elements on at most
+ 
++    unsigned i_elements = 0;
+     while( EbmlElement* el = eparser.Get() )
+     {
+         if( !el->IsFiniteSize() && el->GetElementPosition() != i_last_cluster_pos )
++            return false;
++
++        if( ++i_elements > cues_walk_elements )
+         {
+-            es.I_O().setFilePointer( i_current_position, seek_beginning );
+-            return;
++            msg_Dbg( &sys.demuxer, "the segment goes on more than %u elements after the last cue",
++                     cues_walk_elements );
++            return false;
+         }
+ 
+         if( MKV_IS_ID( el, KaxCluster ) )
+@@ -1072,47 +1517,103 @@ void matroska_segment_c::EnsureDuration()
+     EbmlElement* el = eparser.Get();
+     MKV_CHECKED_PTR_DECL( p_last_cluster, KaxCluster, el );
+ 
+-    if( p_last_cluster &&
+-        ParseCluster( p_last_cluster, false, SCOPE_PARTIAL_DATA ) )
++    if( !p_last_cluster ||
++        !ParseCluster( p_last_cluster, false, SCOPE_PARTIAL_DATA ) )
++        return false;
++
++    // use the last block + duration
++    uint64 i_last_timecode = p_last_cluster->GlobalTimecode();
++    for( unsigned int i = 0; i < p_last_cluster->ListSize(); i++ )
+     {
+-        // use the last block + duration
+-        uint64 i_last_timecode = p_last_cluster->GlobalTimecode();
+-        for( unsigned int i = 0; i < p_last_cluster->ListSize(); i++ )
+-        {
+-            EbmlElement *l = (*p_last_cluster)[i];
++        EbmlElement *l = (*p_last_cluster)[i];
+ 
+-            if( MKV_CHECKED_PTR_DECL ( block, KaxSimpleBlock, l ) )
+-            {
+-                block->SetParent( *p_last_cluster );
+-                i_last_timecode = std::max(i_last_timecode, block->GlobalTimecode());
+-            }
+-            else if( MKV_CHECKED_PTR_DECL ( group, KaxBlockGroup, l ) )
++        if( MKV_CHECKED_PTR_DECL ( block, KaxSimpleBlock, l ) )
++        {
++            block->SetParent( *p_last_cluster );
++            i_last_timecode = std::max(i_last_timecode, block->GlobalTimecode());
++        }
++        else if( MKV_CHECKED_PTR_DECL ( group, KaxBlockGroup, l ) )
++        {
++            uint64 i_group_timecode = 0;
++            for( unsigned int j = 0; j < group->ListSize(); j++ )
+             {
+-                uint64 i_group_timecode = 0;
+-                for( unsigned int j = 0; j < group->ListSize(); j++ )
+-                {
+-                    EbmlElement *l = (*group)[j];
++                EbmlElement *l = (*group)[j];
+ 
+-                    if( MKV_CHECKED_PTR_DECL ( block, KaxBlock, l ) )
+-                    {
+-                        block->SetParent( *p_last_cluster );
+-                        i_group_timecode += block->GlobalTimecode();
+-                    }
+-                    else if( MKV_CHECKED_PTR_DECL ( kbd_ptr, KaxBlockDuration, l ) )
+-                    {
+-                        i_group_timecode += static_cast<uint64>( *kbd_ptr );
+-                    }
++                if( MKV_CHECKED_PTR_DECL ( block, KaxBlock, l ) )
++                {
++                    block->SetParent( *p_last_cluster );
++                    i_group_timecode += block->GlobalTimecode();
++                }
++                else if( MKV_CHECKED_PTR_DECL ( kbd_ptr, KaxBlockDuration, l ) )
++                {
++                    /* in the segment's ticks, where the block's time is scaled */
++                    i_group_timecode += static_cast<uint64>( *kbd_ptr ) * i_timescale;
+                 }
+-                i_last_timecode = std::max(i_last_timecode, i_group_timecode);
+             }
++            i_last_timecode = std::max(i_last_timecode, i_group_timecode);
+         }
++    }
+ 
+-        i_duration = ( i_last_timecode - cluster->GlobalTimecode() ) / INT64_C(1000000);
+-        msg_Dbg( &sys.demuxer, " extracted Duration=%" PRId64, i_duration );
++    *pi_last_timecode = i_last_timecode;
++    return true;
++}
++
++bool matroska_segment_c::LastTimecodeAtTail( uint64 *pi_last_timecode )
++{
++    uint64_t i_stream_size;
++    if( vlc_stream_GetSize( sys.demuxer.s, &i_stream_size ) || i_stream_size == 0 )
++        return false;
++
++    /* The end of the segment's data, or of the file where the file ends first
++     * (cut short) or the segment's size is unknown: there, the last element
++     * may end with the file, in the middle. */
++    uint64_t i_end = i_stream_size;
++    bool b_cut = true;
++    if( segment->IsFiniteSize() && segment->GetEndPosition() <= i_stream_size )
++    {
++        i_end = segment->GetEndPosition();
++        b_cut = false;
+     }
++    uint64_t i_first = cluster->GetElementPosition();
++    if( i_first >= i_end )
++        return false;
+ 
+-    // get back to the reading position we were at before looking for a duration
+-    es.I_O().setFilePointer( i_current_position, seek_beginning );
++    std::vector<uint64_t> track_numbers;
++    for( tracks_map_t::const_iterator it = tracks.begin(); it != tracks.end(); ++it )
++        track_numbers.push_back( it->first );
++
++    /* Read the end of the data in steps, each before the last, until a step
++     * finds the last cluster, and never before the first cluster. */
++    std::vector<uint8_t> tail;
++    uint64_t i_start = i_end;
++    for( uint64_t i_step : tail_steps )
++    {
++        if( i_start <= i_first )
++            break;
++        uint64_t i_from = i_end - i_first > i_step ? i_end - i_step : i_first;
++        if( i_from >= i_start )
++            continue;
++        size_t i_more = i_start - i_from;
++        tail.insert( tail.begin(), i_more, 0 );
++        es.I_O().setFilePointer( i_from, seek_beginning );
++        if( es.I_O().read( tail.data(), i_more ) != i_more )
++        {
++            msg_Dbg( &sys.demuxer, "could not read the end of the segment" );
++            return false;
++        }
++        i_start = i_from;
++
++        uint64_t i_ticks;
++        if( TailCluster( tail.data(), tail.size(), b_cut, track_numbers ).LastTime( &i_ticks ) )
++        {
++            msg_Dbg( &sys.demuxer, "found the last cluster in the last %zu bytes", tail.size() );
++            *pi_last_timecode = i_ticks * i_timescale;
++            return true;
++        }
++    }
++
++    msg_Dbg( &sys.demuxer, "found no last cluster in the last %zu bytes", tail.size() );
++    return false;
+ }
+ 
+ bool matroska_segment_c::ESCreate()
+diff --git a/modules/demux/mkv/matroska_segment.hpp b/modules/demux/mkv/matroska_segment.hpp
+index daa195a..d01ddbe 100644
+--- a/modules/demux/mkv/matroska_segment.hpp
++++ b/modules/demux/mkv/matroska_segment.hpp
+@@ -176,6 +176,8 @@ private:
+     bool TrackInit( mkv_track_t * p_tk );
+     void ComputeTrackPriority();
+     void EnsureDuration();
++    bool LastTimecodeFromCues( uint64 *pi_last_timecode );
++    bool LastTimecodeAtTail( uint64 *pi_last_timecode );
+ 
+     SegmentSeeker _seeker;
+ 
+-- 
+2.56.0
+

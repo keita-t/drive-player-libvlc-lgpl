@@ -1,0 +1,171 @@
+From f5034a0f7c96e006cb338adee3e1ebc73be0a390 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 14 Nov 2026 23:18:01 +0900
+Subject: [PATCH] ps: tell HEVC and MPEG-4 Visual from MPEG video in a stream
+ with no map
+
+A program stream types its video by its stream map, which FFmpeg never
+writes: remuxed to .mpg, a stream of any codec is an MPEG-1 system stream
+with none. With no map, video was MPEG video unless its first packet looked
+like H.264 or AVS video, so HEVC and MPEG-4 Visual were handed to the MPEG
+video decoder and showed nothing while the clock ran; MPEG-4 Visual's
+visual object sequence, whose start code AVS video's sequence header has
+too, was taken for AVS video.
+
+Tell them by how their data starts, as FFmpeg's demuxer probes them: HEVC
+by a parameter set, access unit delimiter or SEI of the base layer, whose
+NAL header's second byte would be a quantiser scale of zero after an MPEG
+video slice's start code, which MPEG video forbids; MPEG-4 Visual by a
+visual object sequence whose visual object follows its profile and level
+at once, or a video object whose layer follows it at once, before AVS
+video. A packet's data is found after an MPEG-1 header as after an MPEG-2
+one, for these and for AVS video: the probe read past an MPEG-1 header
+as if it were an MPEG-2 one.
+---
+ modules/demux/mpeg/ps.h | 114 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 109 insertions(+), 5 deletions(-)
+
+diff --git a/modules/demux/mpeg/ps.h b/modules/demux/mpeg/ps.h
+index 2725c9b..3ce5654 100644
+--- a/modules/demux/mpeg/ps.h
++++ b/modules/demux/mpeg/ps.h
+@@ -107,6 +107,50 @@ static inline bool ps_is_CAVS( const uint8_t *p_data, size_t i_data )
+            p_data[2] == 1 && p_data[3] == 0xb0;
+ }
+ 
++/* Whether a video stream's data starts as MPEG-4 Visual's does: a visual
++ * object sequence (the start code AVS video's sequence header has too) whose
++ * visual object follows its profile and level at once, or a video object
++ * whose layer follows it at once. Neither is MPEG video: its picture header
++ * holds no start code, and a reserved start code begins no MPEG video. */
++static inline bool ps_is_MPEG4V( const uint8_t *p_data, size_t i_data )
++{
++    static const uint8_t startcode[3] = { 0, 0, 1 };
++
++    if( i_data < 9 || memcmp( p_data, startcode, 3 ) )
++        return false;
++    if( p_data[3] == 0xb0 ) /* visual object sequence, profile and level */
++        return !memcmp( &p_data[5], startcode, 3 ) && p_data[8] == 0xb5;
++    return p_data[3] <= 0x1f && /* video object */
++           !memcmp( &p_data[4], startcode, 3 ) &&
++           ( p_data[7] & 0xf0 ) == 0x20; /* video object layer */
++}
++
++/* Whether a video stream's data starts with an HEVC parameter set, access
++ * unit delimiter or SEI of the base layer: its NAL header's second byte is 1,
++ * which, after the start codes MPEG video gives slices, would be a quantiser
++ * scale of zero, which MPEG video forbids. */
++static inline bool ps_is_HEVC( const uint8_t *p_data, size_t i_data )
++{
++    if( i_data >= 6 && p_data[0] == 0 && p_data[1] == 0 && p_data[2] == 0 && p_data[3] == 1 )
++    {
++        p_data++;
++        i_data--;
++    }
++    if( i_data < 5 || p_data[0] != 0 || p_data[1] != 0 || p_data[2] != 1 || p_data[4] != 0x01 )
++        return false;
++    switch( p_data[3] )
++    {
++        case 0x40: /* VPS */
++        case 0x42: /* SPS */
++        case 0x44: /* PPS */
++        case 0x46: /* AUD */
++        case 0x4e: /* prefix SEI */
++            return true;
++        default:
++            return false;
++    }
++}
++
+ static inline bool ps_is_H264( const uint8_t *p_data, size_t i_data )
+ {
+     const uint8_t startcode[3] = { 0, 0, 1 };
+@@ -140,6 +184,53 @@ static inline bool ps_is_H264( const uint8_t *p_data, size_t i_data )
+     return false;
+ }
+ 
++/* Where a PES packet's data starts, after an MPEG-2 header or an MPEG-1 one
++ * (an MPEG-1 system stream, as FFmpeg writes a program stream to .mpg): its
++ * stuffing, buffer size and timestamps. False when the packet ends first. */
++static inline bool ps_pkt_payload( const block_t *p_pkt, const uint8_t **pp_data, size_t *pi_data )
++{
++    const uint8_t *p = p_pkt->p_buffer;
++    size_t i_size = p_pkt->i_buffer, i_start;
++
++    if( i_size < 9 )
++        return false;
++    if( ( p[6] & 0xc0 ) == 0x80 )
++        i_start = 9 + p[8];
++    else
++    {
++        i_start = 6;
++        while( i_start < i_size && p[i_start] == 0xff )
++            i_start++;
++        if( i_start < i_size && ( p[i_start] & 0xc0 ) == 0x40 )
++            i_start += 2;
++        if( i_start >= i_size )
++            return false;
++        if( ( p[i_start] & 0xf0 ) == 0x20 )
++            i_start += 5;
++        else if( ( p[i_start] & 0xf0 ) == 0x30 )
++            i_start += 10;
++        else if( p[i_start] == 0x0f )
++            i_start += 1;
++        else
++            return false;
++    }
++    if( i_start >= i_size )
++        return false;
++    *pp_data = &p[i_start];
++    *pi_data = i_size - i_start;
++    return true;
++}
++
++/* Whether the data of [p_pkt], a video stream's first packet, starts as
++ * [is] says a codec's does. */
++static inline bool ps_pkt_starts( const block_t *p_pkt,
++                                  bool (*is)( const uint8_t *, size_t ) )
++{
++    const uint8_t *p_data;
++    size_t i_data;
++    return p_pkt != NULL && ps_pkt_payload( p_pkt, &p_data, &i_data ) && is( p_data, i_data );
++}
++
+ /* From id fill i_skip and es_format_t */
+ static inline int ps_track_fill( ps_track_t *tk, ps_psm_t *p_psm,
+                                  int i_id, block_t *p_pkt, bool b_mpeg2only )
+@@ -293,13 +384,26 @@ static inline int ps_track_fill( ps_track_t *tk, ps_psm_t *p_psm,
+             {
+                 es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_H264 );
+             }
++            /* With no stream map to type them, HEVC and MPEG-4 Visual are
++             * told from MPEG video by how their data starts, as FFmpeg's
++             * demuxer probes them: FFmpeg writes no stream map, and writes
++             * an MPEG-1 system stream to .mpg whatever the codec. MPEG-4
++             * Visual's sequence starts with AVS video's start code, so it is
++             * told first. */
++            else if( i_type == 0x00 && /* Not from PSM */
++                     ps_pkt_starts( p_pkt, ps_is_HEVC ) )
++            {
++                es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_HEVC );
++            }
++            else if( i_type == 0x00 && /* Not from PSM */
++                     ps_pkt_starts( p_pkt, ps_is_MPEG4V ) )
++            {
++                es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_MP4V );
++            }
+             /* With no stream map to type it, AVS video is told from MPEG
+              * video by its sequence header, as FFmpeg's demuxer probes it. */
+-            else if( p_pkt && i_type == 0x00 && /* Not from PSM */
+-                     p_pkt->i_buffer > 9 &&
+-                     p_pkt->i_buffer > 9U + p_pkt->p_buffer[8] &&
+-                     ps_is_CAVS( &p_pkt->p_buffer[ 9 + p_pkt->p_buffer[8] ],
+-                                 p_pkt->i_buffer - 9 - p_pkt->p_buffer[8] ) )
++            else if( i_type == 0x00 && /* Not from PSM */
++                     ps_pkt_starts( p_pkt, ps_is_CAVS ) )
+             {
+                 es_format_Change( &tk->fmt, VIDEO_ES, VLC_CODEC_CAVS );
+             }
+-- 
+2.56.0
+

@@ -1,0 +1,274 @@
+From 0d58a288f509328e411aead83d8bce78b89c707d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 18:46:30 +0900
+Subject: [PATCH 121/126] smf: keep the state of the channels and the notes
+ sounding across a seek
+
+A seek flushes the decoder before the demuxer moves, and the synthesizer's
+flush resets its programs: a MIDI file sought anywhere played on with the
+piano on every channel, and with the controllers, pitch bends and sustain
+the file had set before the time lost too. A seek forward only read on
+from where the file was, so even had the synthesizer kept them, what came
+before the playing position was not read again. And a note that started
+before the time and sounded on past it was not heard: a seek into a held
+chord or a long note left silence until the next note.
+
+Read the file from its start on every seek, and keep the messages read
+that set a channel's state rather than play a note: control changes
+(sustain, volume, bank select, the parameters data entry sets), program
+changes, channel pressure, pitch bend and system exclusive messages, in
+the order read. Send them once the seek has landed, at its time, where the
+synthesizer applies them without playing a sample. Then start again there
+the notes sounding at the time, with the velocity they started with: a
+note held there plays on until the file releases it, and a note released
+under the sustain pedal is started and released at once, for the pedal to
+hold until the file lifts it. They start over from their attack. The
+percussion channel's notes are not started again: a drum's hit is a sound
+of its own, not one that lasts.
+
+A seek past the end sends nothing, and leaves no tick to count up to it,
+which would have sent a tick for every ten milliseconds from the start
+to the end.
+---
+ modules/demux/smf.c | 183 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 179 insertions(+), 4 deletions(-)
+
+diff --git a/modules/demux/smf.c b/modules/demux/smf.c
+index 864805e..0496c74 100644
+--- a/modules/demux/smf.c
++++ b/modules/demux/smf.c
+@@ -102,10 +102,94 @@ struct demux_sys_t
+     unsigned     ppqn;   /*< Pulses Per Quarter Note */
+     /* by the way, "quarter note" is "noire" in French */
+ 
++    /* While a seek reads the file through to its time (see Seek): the messages
++     * read that set a channel's state rather than play a note, in the order read,
++     * and the notes sounding where it has read to, by channel and key: the velocity
++     * they started with, with SUSTAINED set once released under the sustain pedal,
++     * or 0 */
++    block_t     *replay;
++    block_t    **replay_last; /*< NULL but while a seek reads through */
++    uint8_t      sounding[16][128];
++    bool         pedal[16];
++
+     unsigned     trackc; /*< Number of tracks */
+     mtrk_t       trackv[]; /*< Track states */
+ };
+ 
++#define SUSTAINED 0x80
++
++/* The channel GM gives the percussion. */
++#define PERCUSSION_CHANNEL 9
++
++/**
++ * Follows a channel message read while a seek reads through: which notes it
++ * starts and ends, and which the sustain pedal keeps sounding once released.
++ */
++static void ChaseNotes (demux_sys_t *sys, const uint8_t *msg, size_t len)
++{
++    unsigned channel = msg[0] & 0x0F;
++    uint8_t *keys = sys->sounding[channel];
++
++    switch (msg[0] & 0xF0)
++    {
++        case 0x90:
++            if (len >= 3 && (msg[2] & 0x7F) > 0)
++            {
++                keys[msg[1] & 0x7F] = msg[2] & 0x7F;
++                break;
++            }
++            /* a note on of velocity 0 is a note off */
++            /* fall through */
++        case 0x80:
++            if (len >= 2)
++            {
++                uint8_t *key = &keys[msg[1] & 0x7F];
++                *key = (*key != 0 && sys->pedal[channel]) ? (*key | SUSTAINED) : 0;
++            }
++            break;
++        case 0xB0:
++            if (len < 3)
++                break;
++            switch (msg[1])
++            {
++                case 64: /* sustain pedal */
++                case 121: /* reset all controllers, the pedal's included */
++                    sys->pedal[channel] = msg[1] == 64 && msg[2] >= 64;
++                    if (!sys->pedal[channel])
++                        for (unsigned key = 0; key < 128; key++)
++                            if (keys[key] & SUSTAINED)
++                                keys[key] = 0;
++                    break;
++                case 120: /* all sound off */
++                case 123: /* all notes off */
++                    memset (keys, 0, 128);
++                    break;
++            }
++            break;
++    }
++}
++
++/**
++ * Whether a message sets the state a channel plays its next notes in — its
++ * program and bank, its controllers (sustain, volume, the parameters data entry
++ * sets...), its pressure and its pitch bend — or the synthesizer's, as a system
++ * exclusive message does, rather than playing or ending a note.
++ */
++static bool SetsChannelState (uint8_t event)
++{
++    switch (event & 0xF0)
++    {
++        case 0xB0: /* control change */
++        case 0xC0: /* program change */
++        case 0xD0: /* channel pressure */
++        case 0xE0: /* pitch bend */
++            return true;
++        case 0xF0:
++            return event == 0xF0 || event == 0xF7; /* system exclusive */
++    }
++    return false;
++}
++
+ /**
+  * Non-MIDI Meta events handler
+  */
+@@ -349,6 +433,15 @@ send:
+     block->i_dts = block->i_pts = date_Get (&p_demux->p_sys->pts);
+     if (out != NULL)
+         es_out_Send (out, p_demux->p_sys->es, block);
++    else if (p_demux->p_sys->replay_last != NULL)
++    {
++        if (event < 0xF0)
++            ChaseNotes (p_demux->p_sys, block->p_buffer, block->i_buffer);
++        if (SetsChannelState (event))
++            block_ChainLastAppend (&p_demux->p_sys->replay_last, block);
++        else
++            block_Release (block);
++    }
+     else
+         block_Release (block);
+ 
+@@ -469,27 +562,107 @@ static int Demux (demux_t *demux)
+     return 1;
+ }
+ 
++/**
++ * Moves to a time, and has the synthesizer play from there as it would have
++ * played through to it.
++ *
++ * A seek flushes the synthesizer before it reaches the demuxer, and a flush
++ * resets every channel: the programs, controllers and pitch bends the file set
++ * before the time are gone, and so is a sustain pedal held down there. So the
++ * file is read from its start to the time, whichever way the seek goes, and the
++ * messages read that set a channel's state are kept in the order read, then sent
++ * with the time landed on, where they play no sound of their own.
++ *
++ * The notes sounding at the time are started again there, so that a held chord
++ * or a long note plays on from the seek rather than leaving silence until the
++ * next note: a note held there with the velocity it started with, and a note
++ * released under the sustain pedal started and released at once, for the pedal
++ * to hold until the file releases it. They start over from their attack. The
++ * percussion channel's notes are not: a drum's hit is a sound of its own, and a
++ * hit before the time is not heard again at it.
++ */
++/* Sends a note on or off at the tick. */
++static void SendNote (demux_t *demux, uint8_t event, uint8_t key, uint8_t velocity)
++{
++    demux_sys_t *sys = demux->p_sys;
++    block_t *block = block_Alloc (3);
++    if (unlikely(block == NULL))
++        return;
++    block->p_buffer[0] = event;
++    block->p_buffer[1] = key;
++    block->p_buffer[2] = velocity;
++    block->i_dts = block->i_pts = sys->tick;
++    es_out_Send (demux->out, sys->es, block);
++}
++
+ static int Seek (demux_t *demux, vlc_tick_t pts)
+ {
+     demux_sys_t *sys = demux->p_sys;
+ 
+-    /* Rewind if needed */
+-    if (pts < date_Get (&sys->pts) && SeekSet0 (demux))
++    if (SeekSet0 (demux))
+         return VLC_EGENERIC;
+ 
+     /* Fast forward */
+     uint64_t pulse = sys->pulse;
++    int ret = VLC_SUCCESS;
+ 
++    sys->replay = NULL;
++    sys->replay_last = &sys->replay;
++    memset (sys->sounding, 0, sizeof (sys->sounding));
++    memset (sys->pedal, 0, sizeof (sys->pedal));
+     while (pts > date_Get (&sys->pts))
+     {
+         if (pulse == UINT64_MAX)
+-            return VLC_SUCCESS; /* premature end */
++            break; /* premature end */
+         if (ReadEvents (demux, &pulse, NULL))
+-            return VLC_EGENERIC;
++        {
++            ret = VLC_EGENERIC;
++            break;
++        }
++    }
++    sys->replay_last = NULL;
++
++    block_t *replay = sys->replay;
++    sys->replay = NULL;
++    if (ret != VLC_SUCCESS)
++    {
++        block_ChainRelease (replay);
++        return ret;
++    }
++    if (pulse == UINT64_MAX)
++    {
++        /* Past the end: nothing more to play, and no tick to count up to it */
++        block_ChainRelease (replay);
++        sys->tick = date_Get (&sys->pts) + TICK;
++        return VLC_SUCCESS;
+     }
+ 
+     sys->pulse = pulse;
+     sys->tick = ((date_Get (&sys->pts) - VLC_TICK_0) / TICK) * TICK + VLC_TICK_0;
++
++    while (replay != NULL)
++    {
++        block_t *block = replay;
++        replay = block->p_next;
++        block->p_next = NULL;
++        block->i_dts = block->i_pts = sys->tick;
++        es_out_Send (demux->out, sys->es, block);
++    }
++
++    for (unsigned channel = 0; channel < 16; channel++)
++    {
++        if (channel == PERCUSSION_CHANNEL)
++            continue;
++        for (unsigned key = 0; key < 128; key++)
++        {
++            uint8_t note = sys->sounding[channel][key];
++            if (note == 0)
++                continue;
++            SendNote (demux, 0x90 | channel, key, note & ~SUSTAINED);
++            if (note & SUSTAINED)
++                SendNote (demux, 0x80 | channel, key, 64);
++        }
++    }
+     return VLC_SUCCESS;
+ }
+ 
+@@ -638,6 +811,8 @@ static int Open (vlc_object_t *obj)
+ 
+     demux->p_sys = sys;
+     sys->duration = 0;
++    sys->replay = NULL;
++    sys->replay_last = NULL;
+     sys->ppqn = ppqn;
+     sys->trackc = tracks;
+ 
+-- 
+2.56.0
+
