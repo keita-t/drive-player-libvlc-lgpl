@@ -9,11 +9,12 @@ The app's current build is tracked separately on `main`.
 
 Each published build of the library has a tag named after its version (`libvlc-lgpl-<version>`), holding exactly the
 sources, patches and build scripts that produced that build. Each maintained branch keeps its latest
-published build available as a GitHub Release; older releases remain available too:
+published build available as a GitHub Release. Releases are kept as they are published from 3.7.6-49 on; the
+releases of earlier builds, other than the ones listed here, were withdrawn, and their tags remain:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
 | 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
 | 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
 
@@ -147,7 +148,7 @@ archive layout described by the existing release. Publish the archive with that 
 branch=ogg-libvlc # main, ogg-libvlc or naked
 tag='libvlc-lgpl-<version>'
 gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
 ```
 
 Replace `<version>` with the actual version (including any variant suffix) before running the command.

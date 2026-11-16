@@ -1,4 +1,4 @@
-<!-- source-sha256: 7caa19f95ad5fa3a7788588f972f74ad07b31f20e0c432f05a7256f5f70fd715 -->
+<!-- source-sha256: 6affd4b568941a6cda676e9f0c0b3563f0c72959905b5307ba5f10c7ff7a2060 -->
 
 # DrivePlayer 向け libVLC — 対応するソースコード
 
@@ -12,11 +12,12 @@ libVLC 自身の Ogg demuxer と libvorbis を使う最後の公開済み通常�
 
 公開ビルドにはバージョンに対応する `libvlc-lgpl-<version>` タグを付け、実際に使ったソース、
 パッチ、ビルドスクリプトを保持します。管理対象の各ブランチでは、最新の公開ビルドを
-GitHub Release で入手できる状態に保ち、過去の Release も残します。
+GitHub Release で入手できる状態に保ちます。3.7.6-49 以降の Release は公開したまま残します。
+それより前のビルドの Release は、ここに挙げたものを除いて取り下げました。タグは残っています。
 
 | ライブラリーのバージョン | タグ | ブランチ | 内容 |
 |---|---|---|---|
-| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | アプリが配布するビルド。[main/PATCHES.ja.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.ja.md) のパッチを含み、タグの GitHub Release にビルド済みライブラリーを添付しています |
+| 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | アプリが配布するビルド。[main/PATCHES.ja.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.ja.md) のパッチを含み、タグの GitHub Release にビルド済みライブラリーを添付しています |
 | 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | libVLC 自身の Ogg demuxer と libvorbis を使う最新の公開済みビルド。当初は通常のアプリ用ビルドとして公開しました |
 | 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | アプリの動作に必須の VLC パッチと Java bindings のパッチだけを含む比較用ビルド |
 
@@ -150,7 +151,7 @@ python3 -m unittest discover -s tests
 branch=ogg-libvlc # main, ogg-libvlc or naked
 tag='libvlc-lgpl-<version>'
 gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
 ```
 
 実行前に `<version>` を実際のバージョン（必要なバリアント接尾辞を含む）に置き換えます。
