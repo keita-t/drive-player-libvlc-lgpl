@@ -13,7 +13,7 @@ published build available as a GitHub Release; older releases remain available t
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
-| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
+| 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
 | 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
 | 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
 
@@ -57,7 +57,7 @@ it carries source patches for behaviour the app relies on.
 
 ### Patches
 
-`patches/libvlcjni/` (5 patches) is applied to libvlcjni, and `patches/vlc/` (124 patches) to VLC after the patches
+`patches/libvlcjni/` (7 patches) is applied to libvlcjni, and `patches/vlc/` (130 patches) to VLC after the patches
 libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
 change it makes:
 
@@ -65,19 +65,20 @@ change it makes:
 |---|---|
 | [License](PATCHES.md#license) | 2 |
 | [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 3 |
-| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 15 |
-| [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 6 |
+| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 16 |
+| [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 7 |
 | [Audio](PATCHES.md#audio) | 13 |
 | [Pause](PATCHES.md#pause) | 2 |
-| [Seeking](PATCHES.md#seeking) | 17 |
+| [Seeking](PATCHES.md#seeking) | 20 |
 | [Times and lengths](PATCHES.md#times-and-lengths) | 17 |
 | [Elementary video streams](PATCHES.md#elementary-video-streams) | 9 |
 | [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 11 |
 | [Video output](PATCHES.md#video-output) | 5 |
-| [Hardware decoders](PATCHES.md#hardware-decoders) | 5 |
-| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 11 |
+| [Hardware decoders](PATCHES.md#hardware-decoders) | 6 |
+| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 12 |
 | [Ogg, with libVLC's own demuxer](PATCHES.md#ogg-with-libvlcs-own-demuxer) (`ogg-libvlc` variant only, but for 0032) | 6 |
 | [MIDI and game music](PATCHES.md#midi-and-game-music) | 7 |
+| [The log](PATCHES.md#the-log) (used by the app's tests, not by the app) | 1 |
 
 ## Build
 

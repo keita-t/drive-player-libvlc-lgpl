@@ -1,0 +1,54 @@
+From 62e9cbb395eb7e4c07b43a97aa5813c8c00193a6 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 10:05:37 +0900
+Subject: [PATCH] h264: date the picture that follows the first one after a
+ discontinuity
+
+A picture that begins in a block another began in has no timestamp of its
+own, and is dated from the picture before it: its decoding time by the
+frame's duration, its presentation time by the picture order count. The
+first picture output after a discontinuity cleared that date instead of
+advancing it. The date is unset by the reset a discontinuity makes, so one
+set at that point is that picture's own timestamp, not one from before the
+discontinuity.
+
+Where a seek lands on a packet of a program stream that holds a small key
+picture and the beginning of the next picture, that next picture, a
+reference picture, was handed to the decoder undated, and its decoded
+picture was dropped as undated: one picture missing after the key picture.
+
+Advance the date from the first picture after a discontinuity as from any
+other.
+---
+ modules/packetizer/h264.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/modules/packetizer/h264.c b/modules/packetizer/h264.c
+index a756199..68eefe7 100644
+--- a/modules/packetizer/h264.c
++++ b/modules/packetizer/h264.c
+@@ -1041,14 +1041,14 @@ static block_t *OutputPicture( decoder_t *p_dec )
+                     p_pic->i_pts - p_pic->i_dts, p_pic->i_pts % (100*CLOCK_FREQ), p_pic->i_length);
+ #endif
+ 
+-    /* save for next pic fixups */
++    /* save for next pic fixups. The first picture after a discontinuity
++     * dates the next one too: a reset leaves the date unset, so one set here
++     * is this picture's own, and the picture that begins in the same block
++     * (a small key picture and the picture after it in one packet of a
++     * program stream) has no timestamp but this. Without a date it was
++     * handed on undated, and a decoder's picture of it was not shown. */
+     if( date_Get( &p_sys->dts ) != VLC_TICK_INVALID )
+-    {
+-        if( p_sys->i_next_block_flags & BLOCK_FLAG_DISCONTINUITY )
+-            date_Set( &p_sys->dts, VLC_TICK_INVALID );
+-        else
+-            date_Increment( &p_sys->dts, i_num_clock_ts );
+-    }
++        date_Increment( &p_sys->dts, i_num_clock_ts );
+ 
+     if( p_pic )
+     {
+-- 
+2.56.0
+

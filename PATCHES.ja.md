@@ -1,12 +1,12 @@
-<!-- source-sha256: 5bb9cce70cbce3aa68f0f7be6a0ca87f4d8ca67cd937770e9724e007fd1678e4 -->
+<!-- source-sha256: fa2c6d131b2e4abc3b6e6738ea11fa30d1615d52cd114827949b71b665690ee1 -->
 
 # パッチ
 
 [English](PATCHES.md) | 日本語
 
 このビルドに含まれる libvlcjni と VLC に対する DrivePlayer の変更です。
-`third-party/libvlc/patches/libvlcjni/` の 5 件を libvlcjni に、
-`third-party/libvlc/patches/vlc/` の 124 件を libvlcjni 自身のパッチの後で VLC に適用します。
+`third-party/libvlc/patches/libvlcjni/` の 7 件を libvlcjni に、
+`third-party/libvlc/patches/vlc/` の 130 件を libvlcjni 自身のパッチの後で VLC に適用します。
 すべて `git am` 形式です。各パッチのメッセージに詳細を記載し、以下の表では解決する問題と変更内容を分類しています。
 欠番は削除または不採用となったものです。0010 と 0018 は過去のバージョンのタグに、
 一度もビルドしなかった 0020〜0024 はこのリポジトリの履歴に残っています。
@@ -20,19 +20,20 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 
 - [ライセンス](#license) (2)
 - [アプリ経由のメディア読み取り](#reading-media-through-the-app) (3)
-- [ストリームのオープンと読み取り](#opening-and-reading-streams) (15)
-- [映像トラックとアプリのウィンドウ](#video-tracks-and-the-apps-window) (6)
+- [ストリームのオープンと読み取り](#opening-and-reading-streams) (16)
+- [映像トラックとアプリのウィンドウ](#video-tracks-and-the-apps-window) (7)
 - [音声](#audio) (13)
 - [一時停止](#pause) (2)
-- [シーク](#seeking) (17)
+- [シーク](#seeking) (20)
 - [時刻と長さ](#times-and-lengths) (17)
 - [映像エレメンタリーストリーム](#elementary-video-streams) (9)
 - [映像寸法とピクセルアスペクト比](#video-size-and-pixel-aspect) (11)
 - [映像出力](#video-output) (5)
-- [ハードウェア decoder](#hardware-decoders) (5)
-- [FFmpeg の decoder](#ffmpegs-decoders) (11)
+- [ハードウェア decoder](#hardware-decoders) (6)
+- [FFmpeg の decoder](#ffmpegs-decoders) (12)
 - [libVLC 自身の demuxer を使う Ogg](#ogg-with-libvlcs-own-demuxer) (6)
 - [MIDI とゲーム音楽](#midi-and-game-music) (7)
+- [ログ](#the-log) (1)
 
 <a id="license"></a>
 
@@ -66,7 +67,7 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0110`](third-party/libvlc/patches/vlc/0110-avformat-probe-more-of-a-stream-whose-first-bytes-tell-no-format.patch) | 形式判定が先頭 2261 バイトに限られていました。FFmpeg は PVA を 2 個のパケットヘッダーで識別するため、最初の I ピクチャーが大きい途中開始ファイルなどでは 1 個しか見つからず、PS demuxer が音声だけを再生していました。 | 先頭で形式を判定できなければ、FFmpeg 自身の探索と同様に探索量を 4 倍ずつ増やし、最大 64 KiB を調べます。先頭で判定できる入力の処理は変わりません。 |
 | [`vlc/0108`](third-party/libvlc/patches/vlc/0108-avformat-allow-seeking-to-the-end-of-the-stream.patch) | ストリーム末尾へのシークを範囲外として拒否し、FFmpeg がエラーと解釈していました。最終チャンクのデータをこのシークで飛ばす DTS-HD demuxer が開けず、PS demuxer で音声なしの再生になっていました。 | 末尾を超えるシークだけを拒否します。 |
 | [`vlc/0045`](third-party/libvlc/patches/vlc/0045-es-open-loas-streams-of-aac-in-latm.patch) | LOAS（LATM 内の AAC。放送や FFmpeg の latm muxer で使われる形式）を VLC 自身の demuxer が開けず、FFmpeg では長さもシークもありませんでした。 | ES demuxer が先頭 3 フレームの連続した同期語を確認して LOAS と判定し、LATM として packetizer に渡します。長さとシーク位置はビットレートから求めます。 |
-| [`vlc/0086`](third-party/libvlc/patches/vlc/0086-ps-tell-avs-video-from-mpeg-video.patch) | ストリームマップのないプログラムストリームでは映像の型がなく、AVS video（CAVS）が MPEG-2 decoder に渡され、表示されませんでした。 | マップから型を読み、マップがなければ MPEG video で予約されているシーケンスヘッダーの開始コードで AVS video を識別します。 |
+| [`vlc/0086`](third-party/libvlc/patches/vlc/0086-ps-tell-avs-video-from-mpeg-video.patch) | ストリームマップのないプログラムストリームでは映像の型がなく、AVS video（CAVS）が MPEG-2 decoder に渡され、表示されませんでした。データで型が分かるのはストリーム先頭の最初のパケットだけで、時刻を指定した開始（静止画を含む）は最初のパケットを読む前にシークするため、トラックが後のパケットで MPEG video と判定され、packetizer が終端までシーケンスヘッダーを待って画像が出ませんでした（時計は進みます）。 | マップから型を読み、マップがなければ MPEG video で予約されているシーケンスヘッダーの開始コードで AVS video を識別します。ストリーム先頭の probe が読む各映像の最初のパケットとストリームマップを保持し、どこから読み始めても同じ型にします。 |
 | [`vlc/0041`](third-party/libvlc/patches/vlc/0041-avi-keep-the-fourcc-of-ut-video-variants-for-the-decoder.patch) | AVI demuxer が Ut Video の fourcc をすべて ULRA に置き換えていたため、fourcc で形式を識別する decoder が 4:2:0（ULY0）を RGBA と解釈し、出力できませんでした。 | SpeedHQ と同様に元の fourcc を保持します。 |
 | [`vlc/0071`](third-party/libvlc/patches/vlc/0071-caf-read-apple-s-gsm-as-gsm-full-rate.patch) | CAF が Apple の GSM full rate を表す agsm を Microsoft GSM と解釈し、decoder が開始できず無音になっていました。 | MP4 demuxer と同じく GSM full rate として読み取ります。 |
 | [`vlc/0085`](third-party/libvlc/patches/vlc/0085-avcodec-name-signed-8-bit-pcm-laid-out-by-channel.patch) | FFmpeg の demuxer が CDXL の音声をチャンネル別の符号付き 8 ビット PCM として渡しても、対応する fourcc がなく decoder を選べず、映像だけが再生されました。 | libavcodec の PCM decoder に対応する fourcc を定義します。 |
@@ -74,6 +75,7 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0090`](third-party/libvlc/patches/vlc/0090-avi-read-a-chunk-found-without-an-index-only-as-its-track-s-next.patch) | インデックスがない場合、次のチャンクの探索で途中のチャンクを飛ばしたため、音声を先に配置したファイルでは音声が先へ飛び、隙間が無音になりました。 | 探索で見つけたチャンクは、読み取り対象トラックの次のチャンクの場合だけ読み、他はインデックス登録だけを行います。 |
 | [`vlc/0120`](third-party/libvlc/patches/vlc/0120-mkv-find-the-length-of-a-segment-without-walking-all-its-clusters.patch) | duration のない Matroska セグメントで、長さを得るため先頭クラスタから末尾まで各要素をシークと読み取りで走査していました。ライブ出力として書かれた約 1400 クラスタの 2 時間のファイルでは、再生前の読み取りに再生時間と同じだけかかりました。 | Cues の最後のクラスタからの走査を 8 要素で止め、それを超える場合や Cues がなければ末尾 1 MiB、次に 4 MiB を一括で読み、最後の完全なクラスタをメモリー上で探します。見つからなければ長さは不明のままにします。 |
 | [`vlc/0131`](third-party/libvlc/patches/vlc/0131-ps-tell-HEVC-and-MPEG-4-Visual-from-MPEG-video-in-a-stream-with-no-map.patch) | FFmpeg が書かないストリームマップだけで PS の映像形式を判断していたため、.mpg にリマックスした HEVC と MPEG-4 Visual が MPEG video に渡り、表示されませんでした。MPEG-4 Visual の開始コードは AVS と誤認されました。 | マップがなければ、データ先頭のベースレイヤーの parameter set、delimiter、SEI で HEVC を、visual object sequence または object layer で MPEG-4 Visual を、AVS より先に判定します。MPEG-1 ヘッダーの後でも MPEG-2 と同様にパケットデータを探します。 |
+| [`vlc/0134`](third-party/libvlc/patches/vlc/0134-ps-leave-a-track-s-language-unset-when-the-stream-map-states-none.patch) | ストリームマップが言語の descriptor（ISO 639）なしで挙げるストリームでは、初期化されていない descriptor の 3 バイトがトラックの言語になりました。descriptor のないマップで映像の型を示す監視カメラ・レコーダーのストリームは UTF-8 でない言語を持ち、bindings がトラックを読むと Java VM がアプリのプロセスを中断しました。 | マップを読む前に descriptor を初期化し、言語のないストリームのトラックは言語を持ちません。 |
 
 
 <a id="video-tracks-and-the-apps-window"></a>
@@ -88,6 +90,7 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0115`](third-party/libvlc/patches/vlc/0115-decoder-drop-the-pictures-of-a-video-decoder-selected-mid-timeline-until-a-flush.patch) | 音声のため読み進んだ後でウィンドウができて映像を選ぶと、キーピクチャーではない現在位置から decoder にデータが渡り、参照画像がない壊れた映像や灰色の画面が表示され、再開始のシークまで残ることがありました。 | タイムラインにデータを供給した後の選択で作った映像 decoder は、フラッシュが実行されるまで画像を捨てます。シークがなければ最初に捨てた画像から 1 秒後に表示を始めます。要求時ではなくスレッドが decoder と出力を実際にフラッシュしてから解除し、その間に届く古い画像も防ぎます。demuxer が発見した時点で作る decoder の開始は従来どおりです。 |
 | [`vlc/0117`](third-party/libvlc/patches/vlc/0117-lib-describe-the-transfer-function-of-a-video-track.patch) | アプリ自身で映像を描く場合、PQ や HLG を SDR としてそのまま表示すると色が薄く見えるため HDR の判定が必要です。入力項目にある伝達関数が libVLC のトラック情報には含まれていませんでした。 | 映像トラック情報に video_transfer_func_t の値として伝達関数を含めます。 |
 | [`libvlcjni/0005`](third-party/libvlc/patches/libvlcjni/0005-describe-the-transfer-function-of-a-video-track.patch) | Java bindings の映像トラックにも伝達関数がなく、PQ や HLG の動画から取得した静止画を SDR と区別できませんでした。 | IMedia.VideoTrack.colorTransfer に 0117 の値を公開し、IMedia.VideoTrack.ColorTransfer に定数名を定義します。 |
+| [`libvlcjni/0006`](third-party/libvlc/patches/libvlcjni/0006-hand-java-no-string-that-is-not-utf-8.patch) | libVLC が bindings に渡す文字列（トラックの名前と言語、メタデータ、タイトル）は `NewStringUTF` で Java の文字列になり、UTF-8 でないバイトは debuggable なプロセスを中断させます（CheckJNI）。bindings の検査は、2 バイト目以降の最上位ビットが立っていれば通し、文字の途中で終わる文字列も通していたため、Latin-1 や Windows-1251 で名付けた MP4 のトラックを読むとアプリのプロセスが中断しました。 | 2 バイト目以降は `10xxxxxx` だけを認め、文字列の終わりは数えません。そうした文字列は検査が拒んだ文字列と同じく null として渡し、アプリはトラックを自身の名前で示します。 |
 
 <a id="audio"></a>
 
@@ -138,9 +141,12 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0092`](third-party/libvlc/patches/vlc/0092-vout-take-a-picture-without-a-date-with-a-flush-of-all-the-pictures.patch) | 映像出力のフラッシュで時刻のない画像が残りました。末尾で一時停止した入力がクロック参照なしで強制表示する画像などが、シーク後に再表示され、末尾が画面に残りました。 | 全画像のフラッシュでは時刻のない画像も取り除きます。 |
 | [`vlc/0043`](third-party/libvlc/patches/vlc/0043-mp4-seek-a-fragment-s-samples-to-the-sync-sample-before-the-time.patch) | fragmented MP4 のフラグメント内シークが同期サンプルを考慮せず指定時刻のサンプルに移動し、次のフラグメントのキーピクチャーまで映像が出ませんでした。 | フラグメントの sample flags から指定時刻以前の最後の同期サンプルを見つけ、各トラックをそこへ移動します。精密シークでは指定時刻から表示します。 |
 | [`vlc/0080`](third-party/libvlc/patches/vlc/0080-avformat-open-a-file-ffmpeg-cannot-seek-again-at-its-start.patch) | インデックスのない MSN webcam stream や Motion Pixels では FFmpeg が先頭から読んで時刻を探索し、失敗すると末尾に残るため、時刻指定で冒頭から再開すると終了しました。 | シーク失敗時に先頭で開き直します。先頭へのシークは成功し、他の位置へのシークでは先頭から再生を続けます。 |
+| [`vlc/0136`](third-party/libvlc/patches/vlc/0136-avformat-play-a-format-FFmpeg-cannot-seek-in-from-its-start-alone.patch) | FFmpeg の Westwood VQA と THP の demuxer は、自身のシークも索引も、ファイルを探す timestamp も持ちません。FFmpeg が時刻を探してファイルを読み進め、VQA のシークは終端に、THP のシークは止まる画像や時刻から離れた画像に着地しました。 | 両形式は長さを述べない形式と同じく先頭からだけ再生します。長さを報告せず（アプリはシークバーを出しません）、先頭へのシークは FFmpeg のシークを使わずファイルを開き直し（0080）、他の位置へのシークは失敗して先頭から再生を続けます。demuxer の能力は FFmpeg の API にないため、形式を名前で挙げます。 |
 | [`vlc/0093`](third-party/libvlc/patches/vlc/0093-avformat-seek-a-gxf-or-pva-file-to-the-key-picture-before-the-time.patch) | FFmpeg の GXF と PVA はキーピクチャーを考慮せず指定時刻の画像へシークしていました。PVA は時刻のある全パケットをキーとして索引に載せるため、表示が最大 1 秒遅れたり、末尾近くで何も表示しなくなったりしました。 | 指定時刻の 1、2、4…最大 16 秒前から読み、直前の最後のキーピクチャーを見つけて正確にシークします。指定時刻まではデコードだけを行います。 |
 | [`vlc/0088`](third-party/libvlc/patches/vlc/0088-nsv-report-the-length-and-seek-a-time-by-the-file-header-or-to-the-start-without-one.patch) | NSV は読み取り開始位置を時刻の起点とし、時刻シークを拒否していました。再開始で先読みを失い、長さと同期フレーム位置を持つファイルヘッダーも飛ばすため、長さもシークもありませんでした。 | ヘッダーから長さと目次を読み、指定時刻以前の最後の同期フレームへ移動します。精密シークは指定時刻から表示します。ヘッダーがない入力は先頭へのシークだけを受け付け、シーク位置から時刻を付け直します。 |
 | [`vlc/0111`](third-party/libvlc/patches/vlc/0111-avformat-correct-a-musepack-sv8-stream-s-length-and-seek-index-from-its-header.patch) | FFmpeg の Musepack SV8 は長さをパケット単位（44.1 kHz で 1.67 秒）で計算し、最大 1 パケット短く報告していました。シーク表の 2 番目の項目も 1 パケット早く索引付けされ、最初の 2 項目の間へのシークでは全音声が目標以前と判定されて末尾まで捨てられました。 | ストリームヘッダーのサンプル数とレートから長さを計算します。シーク前に表からシーク間隔を読み、誤配置された項目を正しいパケット時刻に登録します。 |
+| [`vlc/0132`](third-party/libvlc/patches/vlc/0132-packetizer-take-a-block-s-discontinuity-once.patch) | discontinuity の印を持つブロック（シーク後の最初のブロック）は、packetizer を reset してから読みます。画像が完成するとブロックの残りが次の画像のために再び渡されますが、印が残っていたため、そのブロックが完成させた画像の後に 2 度目の reset が起きていました。小さいキー画像と次の画像の先頭が同じブロックにある位置へシークすると（黒い画像で始まるプログラムストリームの 2 kB のパケット）、H.264 と HEVC の packetizer はキー画像で得た復帰を失って次のキー画像まで全画像を捨て、MPEG video の packetizer は次の画像の先頭を捨てました。アプリはウィンドウが付くたびにシークするため、H.264 のプログラムストリームは最初の GOP の画像を表示しませんでした。 | reset した時点で印を外します。packetizer の共通処理（H.264、HEVC、MPEG video、MPEG-4 Visual、VC-1、AC-3、DTS、FLAC、MLP、MPEG audio、MPEG-4 audio）への変更です。 |
+| [`vlc/0133`](third-party/libvlc/patches/vlc/0133-h264-date-the-picture-that-follows-the-first-one-after-a-discontinuity.patch) | 他の画像が始まったブロックの中で始まる画像は自身の時刻を持たず、H.264 の packetizer は前の画像から時刻を補います（復号時刻はフレームの長さ分、表示時刻は picture order count から）。discontinuity の後の最初の画像は、補う元の時刻を進めずに消していたため、0132 と同じ位置へのシークで、キー画像の次の参照画像が時刻なしで decoder に渡り、その画像が捨てられました。 | reset の後に設定された時刻はその画像自身のものとして、他の画像と同じく進めます。 |
 
 <a id="times-and-lengths"></a>
 
@@ -225,6 +231,7 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0046`](third-party/libvlc/patches/vlc/0046-mediacodec-hand-h.263-version-2-pictures-to-the-next-decoder-when-the-codec-states-no-profile-of-it.patch) | Baseline だけを報告する H.263 codec が version 2 の拡張 picture type を受け付けて入力消費後に失敗し、引き継いだ decoder が次の intra picture までの画像を失いました。 | 最初の picture header を読み、version 2 で対応 profile が報告されていなければ入力をキューに入れる前に次の decoder へ渡します。 |
 | [`vlc/0047`](third-party/libvlc/patches/vlc/0047-mediacodec-start-a-deferred-mpeg-2-output-at-a-sequence-header.patch) | 遅延開始する MPEG-2 出力が最初のブロックで開き、FFmpeg の GXF シーク後など GOP の途中から始まると sequence header がないため、正方形で開き、未デコードの画像を参照しました。 | extra data の sequence header があれば比率を使い、なければ sequence header か intra picture のあるブロックまで開始を待ちます。 |
 | [`vlc/0052`](third-party/libvlc/patches/vlc/0052-mediacodec-begin-mpeg-2-after-a-flush-at-a-sequence-header-or-intra-picture-too.patch) | 即時に開いた MPEG-2 出力やフラッシュ後のストリームが次のブロックから再開し、FFmpeg の GXF のようにキー画像が分からない demuxer では MediaCodec が参照画像を持たず、一時停止中のシークで画像を待ち続けました。 | 開始とフラッシュ後には、picture header から判定した intra picture または sequence header を待ちます。intra picture なしで更新する入力は 128 ブロック後に開始します。 |
+| [`vlc/0137`](third-party/libvlc/patches/vlc/0137-mpeg4video-leave-stuffing-out-of-the-pictures.patch) | 固定レートの encoder が画像の後に書く stuffing（開始コード `0x1C3` と `0xFF` の並び）を、MPEG-4 Visual の packetizer が次の画像の先頭として溜めたため、プログラムストリームのように packetizer が画像を組み立て直す入力では、全画像が stuffing で始まるブロックとして decoder に渡りました。MediaTek の MediaCodec の MPEG-4 decoder（`c2.mtk.mpeg4.decoder`）は最初のそうしたブロックから画像を出さなくなり、固定レートの MPEG-4 Visual のプログラムストリームが最初の数枚の後に止まりました（先頭からの再生、シーク、静止画）。 | stuffing は packetizer が見つけた時点で捨てます。AVI や MP4 は画像とその後の stuffing を 1 つのパケットで運び、従来どおり stuffing はブロックの末尾にあります。 |
 
 <a id="ffmpegs-decoders"></a>
 
@@ -240,6 +247,7 @@ Ogg demuxer のパッチ（0033、0035〜0037、0059、0060、0116）はソー�
 | [`vlc/0113`](third-party/libvlc/patches/vlc/0113-avcodec-decode-mimic-without-direct-rendering.patch) | MSN webcam の MIMIC は過去 16 枚を参照して保持するため、出力の画像へ直接デコードすると数枚でプールを使い切り、クロックだけが進みながら空き画像を待ち続けました。 | 直接描画から除外済みの codec と同様、decoder 自身のバッファーへデコードして出力へコピーします。 |
 | [`vlc/0066`](third-party/libvlc/patches/vlc/0066-avcodec-decode-lossless-jpeg-with-the-decoder-of-motion-jpeg.patch) | libavcodec は lossless JPEG を Motion JPEG decoder で扱いますが、VLC が要求した codec id では見つからず、映像が表示されませんでした。 | lossless JPEG の decoder がなければ Motion JPEG decoder を要求します。 |
 | [`vlc/0065`](third-party/libvlc/patches/vlc/0065-mp4-read-the-color-table-a-palettized-quicktime-picture-describes.patch) | palettized QuickTime の sample description にある色テーブルを読まず、Apple Graphics（SMC）が全画像を黒く描き、後続の pasp、fiel box も失われました。 | libavcodec の形式でトラックの palette に色テーブルを読み、その後の box も読みます。 |
+| [`vlc/0135`](third-party/libvlc/patches/vlc/0135-avcodec-show-each-palettized-picture-through-its-own-palette.patch) | palette 化した画像（PAL8）を PAL8 のまま出力したため、出力の形式を決めた最初の画像の palette を出力の変換器が持ち続け、palette が変わっても出力を作り直しませんでした。画像ごとに palette を変える decoder の後の画像が最初の palette の色で描かれ、場面ごとに palette を持つ VQA の動画は崩れた緑の画像になりました。colour chunk で palette を変える FLIC も同様でした。 | palette 化した画像を RGB32 で出力し、各画像を復号した palette で decoder から写します（direct rendering は palette 化した画像を受けません）。demuxer が述べる palette は従来どおり最初のパケットと一緒に decoder に渡します。 |
 | [`vlc/0087`](third-party/libvlc/patches/vlc/0087-avparser-packetize-avs-video-split-across-blocks.patch) | FFmpeg parser の packetizer が VP9 専用で、PS パケットが画像の途中で切れる AVS video が decoder に完全な画像として渡らず、表示されませんでした。 | AVS video にも対応し、複数ブロックにまたがるフレームをまとめ、開始ブロックの時刻を使います。 |
 | [`vlc/0107`](third-party/libvlc/patches/vlc/0107-avcodec-time-a-picture-of-an-intra-only-codec-by-its-decoding.patch) | composition offset のない MP4 は DTS だけを持ち、packetizer のない codec は PTS なしで libavcodec に届きます。パケットを自分で扱う APV は画像にも時刻を付けず、すべて捨てられました。 | intra-only codec はデコード順に表示するため、PTS のないブロックには DTS を PTS として渡します。 |
 | [`vlc/0129`](third-party/libvlc/patches/vlc/0129-avcodec-keep-the-pictures-frame-threads-hold-from-coming-out-too-late.patch) | frame threads はスレッド数−1 個の後続パケットまで画像を保持します。低フレームレートの VP3/NSV や MIMIC では出力が遅れて表示できず、音声だけが進み画像が止まりました。 | VP3、Theora、MIMIC では frame threads を使いません。レートが分かる入力では保持が 0.25 秒以内になる数に制限します。 |
@@ -279,3 +287,11 @@ MIDI は VLC の `fluidsynth` モジュール経由で FluidLite とアプリ指
 | [`vlc/0125`](third-party/libvlc/patches/vlc/0125-fluidsynth-share-one-SoundFont-among-the-synthesizers-of-the-process.patch) | 各 synthesizer が SoundFont を個別にロードし、GeneralUser GS では約 90 MB を使いました。再生中に次のトラックを準備すると二重に保持・ロードし、SH-02M の SF3 ではロードに 3 秒かかりました。 | パスで指定した SoundFont をプロセスごとに一度だけ読み、同じパスの synthesizer 間で共有し、最後の利用者が解放したときに削除します。 |
 | [`vlc/0126`](third-party/libvlc/patches/vlc/0126-contrib-fluidlite-take-the-loop-of-a-compressed-sample-as-a-SoundFont-2-sample-s.patch) | 圧縮サンプル（SF3）のデコード後、末尾の直後で終わるループや先頭から始まるループを不正と判断して移動し、SF3 化した GeneralUser GS の 920 ループ中 50 個（grand piano を含む）が変わりました。 | デコードしたサンプルのループを、非圧縮サンプルと同じ基準で検査します。 |
 | [`vlc/0130`](third-party/libvlc/patches/vlc/0130-smf-land-a-seek-at-the-time-asked-for-not-at-the-next-event.patch) | MIDI シークで指定時刻までのイベントを読んだ後、次のイベントの時刻から tick を数えたため、イベントの間隔が広いファイルでは 1 秒以上先に着地し、その間の音を飛ばしました。 | 次のイベントが指定時刻より後なら、指定時刻から tick を数えます。 |
+
+<a id="the-log"></a>
+
+## ログ
+
+| パッチ | 問題 | 変更 |
+|---|---|---|
+| [`libvlcjni/0007`](third-party/libvlc/patches/libvlcjni/0007-write-an-instance-s-log-to-a-file-the-application-names.patch) | libVLC は選んだものと行ったことをログでしか伝えず、ログは logcat に出ます。libVLC の debug レベルほど多く書くプロセスの行は、読み手が遅れると logd が読み飛ばすため、ログを読み戻すアプリの試験が行を取りこぼしました。 | `LibVLC.setLogFile(path, level)` で、インスタンスのログを logcat の代わりにファイルへ追記させます。各行は logcat の `threadtime` 形式（`VLC` タグ）で、1 回の書き込みで書きます。インスタンスの解放前に callback を外します。アプリの試験が使い、アプリ自身は使いません。 |

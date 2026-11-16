@@ -1,4 +1,4 @@
-<!-- source-sha256: e91f91e018909c0c0c89c27dd1d93943d800a276d9a7e5e6e9e76c5f2098a4cb -->
+<!-- source-sha256: 51d3c24376a1866c1a32e885a0b9fc1d03190780ca2249422b90a40119ea647f -->
 
 # DrivePlayer 向け libVLC — 対応するソースコード
 
@@ -15,7 +15,7 @@ GitHub Release で入手できる状態に保ち、過去の Release も残し�
 
 | ライブラリーのバージョン | タグ | ブランチ | 内容 |
 |---|---|---|---|
-| 3.7.6-46 | [`libvlc-lgpl-3.7.6-46`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-46) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | アプリが配布するビルド。[main/PATCHES.ja.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.ja.md) のパッチを含み、タグの GitHub Release にビルド済みライブラリーを添付しています |
+| 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | アプリが配布するビルド。[main/PATCHES.ja.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.ja.md) のパッチを含み、タグの GitHub Release にビルド済みライブラリーを添付しています |
 | 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | libVLC 自身の Ogg demuxer と libvorbis を使う最新の公開済みビルド。当初は通常のアプリ用ビルドとして公開しました |
 | 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | アプリの動作に必須の VLC パッチと Java bindings のパッチだけを含む比較用ビルド |
 
@@ -59,7 +59,7 @@ VideoLAN が Maven Central で公開する `org.videolan.android:libvlc-all` と
 
 ### パッチ
 
-`patches/libvlcjni/` の 5 件を libvlcjni に適用し、`patches/vlc/` の 124 件を libvlcjni 自身のパッチの
+`patches/libvlcjni/` の 7 件を libvlcjni に適用し、`patches/vlc/` の 130 件を libvlcjni 自身のパッチの
 後で VLC に適用します。いずれも `git am` を使用します。[PATCHES.ja.md](PATCHES.ja.md) に各問題と変更を
 記載しています。
 
@@ -67,19 +67,20 @@ VideoLAN が Maven Central で公開する `org.videolan.android:libvlc-all` と
 |---|---|
 | [ライセンス](PATCHES.ja.md#license) | 2 |
 | [アプリ経由のメディア読み取り](PATCHES.ja.md#reading-media-through-the-app) | 3 |
-| [ストリームのオープンと読み取り](PATCHES.ja.md#opening-and-reading-streams) | 15 |
-| [映像トラックとアプリのウィンドウ](PATCHES.ja.md#video-tracks-and-the-apps-window) | 6 |
+| [ストリームのオープンと読み取り](PATCHES.ja.md#opening-and-reading-streams) | 16 |
+| [映像トラックとアプリのウィンドウ](PATCHES.ja.md#video-tracks-and-the-apps-window) | 7 |
 | [音声](PATCHES.ja.md#audio) | 13 |
 | [一時停止](PATCHES.ja.md#pause) | 2 |
-| [シーク](PATCHES.ja.md#seeking) | 17 |
+| [シーク](PATCHES.ja.md#seeking) | 20 |
 | [時刻と長さ](PATCHES.ja.md#times-and-lengths) | 17 |
 | [映像エレメンタリーストリーム](PATCHES.ja.md#elementary-video-streams) | 9 |
 | [映像寸法とピクセルアスペクト比](PATCHES.ja.md#video-size-and-pixel-aspect) | 11 |
 | [映像出力](PATCHES.ja.md#video-output) | 5 |
-| [ハードウェア decoder](PATCHES.ja.md#hardware-decoders) | 5 |
-| [FFmpeg の decoder](PATCHES.ja.md#ffmpegs-decoders) | 11 |
+| [ハードウェア decoder](PATCHES.ja.md#hardware-decoders) | 6 |
+| [FFmpeg の decoder](PATCHES.ja.md#ffmpegs-decoders) | 12 |
 | [libVLC 自身の demuxer を使う Ogg](PATCHES.ja.md#ogg-with-libvlcs-own-demuxer)（0032 を除き `ogg-libvlc` バリアントのみ） | 6 |
 | [MIDI とゲーム音楽](PATCHES.ja.md#midi-and-game-music) | 7 |
+| [ログ](PATCHES.ja.md#the-log)（アプリの試験が使い、アプリ自身は使わない） | 1 |
 
 ## ビルド
 

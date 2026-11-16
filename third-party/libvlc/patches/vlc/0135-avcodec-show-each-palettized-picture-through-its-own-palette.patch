@@ -1,0 +1,180 @@
+From 89727dd5536ddf286dd4ed6cb1411e37ad5333c9 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 18:15:20 +0900
+Subject: [PATCH] avcodec: show each palettized picture through its own palette
+
+A palettized picture (PAL8) was output as such: its palette was taken from
+the first picture decoded into the output's format, and the output, which
+draws through a converter it makes with that format, kept it. A decoder
+that changes its palette from one picture to the next had its later
+pictures drawn in the first palette's colours: a VQA cutscene, whose scenes
+each bring a palette of their own, showed a scene in the colours of the
+first (a green, broken picture), as could a FLIC whose colour chunks change
+the palette. A palette is no part of what makes the output be made again.
+
+Output palettized pictures as RGB32, each picture's indices looked up in
+the palette it was decoded with as it is copied out of the decoder (direct
+rendering does not take palettized pictures). The palette a demuxer states
+still goes to the decoder with the first packet.
+---
+ modules/codec/avcodec/video.c | 93 ++++++++++++++++-------------------
+ 1 file changed, 43 insertions(+), 50 deletions(-)
+
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index aae08b4..232096c 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -135,6 +135,25 @@ static uint32_t ffmpeg_CodecTag( vlc_fourcc_t fcc )
+ /**
+  * Sets the decoder output format.
+  */
++/* The chroma a picture of pix_fmt is output in. A palettized picture is output
++ * as RGB32 through the palette it was decoded with (lavc_CopyPicture): a
++ * decoder may change its palette from one picture to the next (VQA from one
++ * scene to the next, FLIC by a colour chunk), and a palettized output takes
++ * its palette once, when the output is made. */
++static int GetOutputChroma(video_format_t *fmt, enum AVPixelFormat pix_fmt)
++{
++    if (pix_fmt == AV_PIX_FMT_PAL8)
++    {
++        /* libavutil's palette entries are 0xAARRGGBB in the CPU's order */
++        fmt->i_chroma = VLC_CODEC_RGB32;
++        fmt->i_rmask = 0x00ff0000;
++        fmt->i_gmask = 0x0000ff00;
++        fmt->i_bmask = 0x000000ff;
++        return VLC_SUCCESS;
++    }
++    return GetVlcChroma(fmt, pix_fmt);
++}
++
+ static int lavc_GetVideoFormat(decoder_t *dec, video_format_t *restrict fmt,
+                                AVCodecContext *ctx, enum AVPixelFormat pix_fmt,
+                                enum AVPixelFormat sw_pix_fmt)
+@@ -148,16 +167,9 @@ static int lavc_GetVideoFormat(decoder_t *dec, video_format_t *restrict fmt,
+     {   /* software decoding */
+         int aligns[AV_NUM_DATA_POINTERS];
+ 
+-        if (GetVlcChroma(fmt, pix_fmt))
++        if (GetOutputChroma(fmt, pix_fmt))
+             return -1;
+ 
+-        /* The libavcodec palette can only be fetched when the first output
+-         * frame is decoded. Assume that the current chroma is RGB32 while we
+-         * are waiting for a valid palette. Indeed, fmt_out.video.p_palette
+-         * doesn't trigger a new vout request, but a new chroma yes. */
+-        if (pix_fmt == AV_PIX_FMT_PAL8 && !dec->fmt_out.video.p_palette)
+-            fmt->i_chroma = VLC_CODEC_RGB32;
+-
+         avcodec_align_dimensions2(ctx, &width, &height, aligns);
+     }
+     else /* hardware decoding */
+@@ -337,9 +349,6 @@ static int lavc_UpdateVideoFormat(decoder_t *dec, AVCodecContext *ctx,
+         date_Init(&dec->p_sys->pts, fmt_out.i_frame_rate,
+                                     fmt_out.i_frame_rate_base);
+ 
+-    fmt_out.p_palette = dec->fmt_out.video.p_palette;
+-    dec->fmt_out.video.p_palette = NULL;
+-
+     es_format_Change(&dec->fmt_out, VIDEO_ES, fmt_out.i_chroma);
+     dec->fmt_out.video = fmt_out;
+     dec->fmt_out.video.orientation = dec->fmt_in.video.orientation;
+@@ -361,7 +370,8 @@ static int lavc_CopyPicture(decoder_t *dec, picture_t *pic, AVFrame *frame)
+ {
+     decoder_sys_t *sys = dec->p_sys;
+ 
+-    vlc_fourcc_t fourcc = FindVlcChroma(frame->format);
++    vlc_fourcc_t fourcc = frame->format == AV_PIX_FMT_PAL8 ? VLC_CODEC_RGB32
++                                                          : FindVlcChroma(frame->format);
+     if (!fourcc)
+     {
+         const char *name = av_get_pix_fmt_name(frame->format);
+@@ -378,6 +388,23 @@ static int lavc_CopyPicture(decoder_t *dec, picture_t *pic, AVFrame *frame)
+         return VLC_EGENERIC;
+     }
+ 
++    if (frame->format == AV_PIX_FMT_PAL8)
++    {
++        /* Each index through this picture's own palette (GetOutputChroma) */
++        const uint32_t *palette = (const uint32_t *) frame->data[1];
++        const uint8_t *src = frame->data[0];
++        uint8_t *dst = pic->p[0].p_pixels;
++        for (int line = 0; line < pic->p[0].i_visible_lines; line++)
++        {
++            uint32_t *out = (uint32_t *) dst;
++            for (int x = 0; x < frame->width; x++)
++                out[x] = palette[src[x]];
++            src += frame->linesize[0];
++            dst += pic->p[0].i_pitch;
++        }
++        return VLC_SUCCESS;
++    }
++
+     for (int plane = 0; plane < pic->i_planes; plane++)
+     {
+         const uint8_t *src = frame->data[plane];
+@@ -654,7 +681,7 @@ static int InitVideoDecCommon( decoder_t *p_dec )
+     p_sys->b_intra_only = p_descriptor && ( p_descriptor->props & AV_CODEC_PROP_INTRA_ONLY );
+ 
+     /* Set output properties */
+-    if( GetVlcChroma( &p_dec->fmt_out.video, p_context->pix_fmt ) != VLC_SUCCESS )
++    if( GetOutputChroma( &p_dec->fmt_out.video, p_context->pix_fmt ) != VLC_SUCCESS )
+     {
+         /* we are doomed. but not really, because most codecs set their pix_fmt later on */
+         p_dec->fmt_out.i_codec = VLC_CODEC_I420;
+@@ -663,13 +690,9 @@ static int InitVideoDecCommon( decoder_t *p_dec )
+ 
+     p_dec->fmt_out.video.orientation = p_dec->fmt_in.video.orientation;
+ 
+-    if( p_dec->fmt_in.video.p_palette ) {
+-        p_sys->palette_sent = false;
+-        p_dec->fmt_out.video.p_palette = malloc( sizeof(video_palette_t) );
+-        if( p_dec->fmt_out.video.p_palette )
+-            *p_dec->fmt_out.video.p_palette = *p_dec->fmt_in.video.p_palette;
+-    } else
+-        p_sys->palette_sent = true;
++    /* The demuxer's palette goes to the decoder with the first packet; the
++     * pictures carry their own (GetOutputChroma) */
++    p_sys->palette_sent = p_dec->fmt_in.video.p_palette == NULL;
+ 
+     /* ***** init this codec with special data ***** */
+     ffmpeg_InitCodec( p_dec );
+@@ -1419,36 +1442,6 @@ static picture_t *DecodeBlock( decoder_t *p_dec, block_t **pp_block, bool *error
+             continue;
+         }
+ 
+-        if( p_context->pix_fmt == AV_PIX_FMT_PAL8
+-         && !p_dec->fmt_out.video.p_palette )
+-        {
+-            /* See AV_PIX_FMT_PAL8 comment in avc_GetVideoFormat(): update the
+-             * fmt_out palette and change the fmt_out chroma to request a new
+-             * vout */
+-            assert( p_dec->fmt_out.video.i_chroma != VLC_CODEC_RGBP );
+-
+-            video_palette_t *p_palette;
+-            p_palette = p_dec->fmt_out.video.p_palette
+-                      = malloc( sizeof(video_palette_t) );
+-            if( !p_palette )
+-            {
+-                *error = true;
+-                av_frame_free(&frame);
+-                break;
+-            }
+-            static_assert( sizeof(p_palette->palette) == AVPALETTE_SIZE,
+-                           "Palette size mismatch between vlc and libavutil" );
+-            assert( frame->data[1] != NULL );
+-            memcpy( p_palette->palette, frame->data[1], AVPALETTE_SIZE );
+-            p_palette->i_entries = AVPALETTE_COUNT;
+-            p_dec->fmt_out.video.i_chroma = VLC_CODEC_RGBP;
+-            if( decoder_UpdateVideoFormat( p_dec ) )
+-            {
+-                av_frame_free(&frame);
+-                continue;
+-            }
+-        }
+-
+         picture_t *p_pic = frame->opaque;
+         /* A lent picture whose planes the decoder moved is not the frame it
+          * decoded: copy the frame out of it, as without direct rendering. */
+-- 
+2.56.0
+
