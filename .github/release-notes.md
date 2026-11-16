@@ -1,0 +1,9 @@
+A comparison build of libVLC for the DrivePlayer app, which the app does not ship: `com.example.driveplayer.thirdparty:libvlc-lgpl` 3.7.6-naked-1, libVLC 3.0 and its Java bindings (libvlcjni) built from sources under the GNU Lesser General Public License 2.1 or more permissive licenses only, for arm64-v8a. It is built by the recipe's `naked` variant (`LIBVLC_VARIANT=naked`) on branch `naked`: of DrivePlayer's VLC patches it applies only the three the app and its tests cannot run without (0001, 0002 and 0117), and all seven Java binding patches, so that the engine's behaviour can be compared with upstream libVLC's. As in the app's build, Ogg is opened with FFmpeg's demuxer. It replaces 3.7.6-29-naked, whose bindings lack the API binding patches 0005-0007 add. The naked variant now counts revisions of its own.
+
+Its complete corresponding source is the tag `libvlc-lgpl-3.7.6-naked-1` (branch `naked`); see its README. The archive was built by the repository's GitHub Actions (`build.yml`) from the recipe that tag holds.
+
+Maintained documentation: [English](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/naked/README.md) / [日本語](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/naked/README.ja.md). Patch descriptions: [English](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/libvlc-lgpl-3.7.6-naked-1/PATCHES.md) / [日本語](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/libvlc-lgpl-3.7.6-naked-1/PATCHES.ja.md).
+
+`libvlc-lgpl-3.7.6-naked-1.tar.xz` holds the AAR and its Maven metadata (`repository/com/example/driveplayer/thirdparty/libvlc-lgpl/3.7.6-naked-1/`) and the native output (`versions/3.7.6-naked-1/out/`: the stripped libraries, the Java bindings, each component's license files and `build-info.txt`).
+
+SHA-256: `9380053615cdd6445949ac039fe6ad89d3551d432dfa3df0ae8ab1c231ae563c`

@@ -1,0 +1,56 @@
+From d1f716037189759133009ff4eaf0446e1b1f9c33 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 18:08:08 +0900
+Subject: [PATCH] Hand Java no string that is not UTF-8
+
+A string libVLC gives the bindings - a track's name or language, a meta, a
+title - is handed to Java through NewStringUTF, which takes it as UTF-8;
+a debuggable process aborts on any other bytes (CheckJNI). The check that
+was to keep such strings back let two through: a byte after a
+character's first that is not 10xxxxxx but has its high bit set, and a
+string that ends inside a character. A demuxer hands on a track's name in
+whatever bytes the file holds: an MP4's track named in Latin-1 ("Fran" and
+0xE7, ending inside a character) or in Windows-1251 (0xD0 0xF3, a lead
+byte after a lead byte) aborted the process as the application read the
+tracks.
+
+Take a character's bytes after its first as 10xxxxxx alone, and the
+string's end as none of them. Such a string is handed on as null, as one
+the check refused was.
+---
+ libvlc/jni/utils.h | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/libvlc/jni/utils.h b/libvlc/jni/utils.h
+index 8316791..1ee5d28 100644
+--- a/libvlc/jni/utils.h
++++ b/libvlc/jni/utils.h
+@@ -109,6 +109,11 @@ struct fields {
+     } Dialog;
+ };
+ 
++/* A Java string of psz_string, or NULL when it is not UTF-8: NewStringUTF takes
++ * it as such, and a debuggable process aborts on any other bytes (CheckJNI).
++ * A character's every byte after its first is 10xxxxxx, and the string does
++ * not end inside one: a demuxer may hand on a track's name in another code
++ * page (Latin-1 "Fran\xe7", Windows-1251 "\xd0\xf3\xf1"). */
+ static inline jstring vlcNewStringUTF(JNIEnv* env, const char* psz_string)
+ {
+     if (psz_string == NULL)
+@@ -128,9 +133,11 @@ static inline jstring vlcNewStringUTF(JNIEnv* env, const char* psz_string)
+             LOGE("Invalid UTF lead character\n");
+             return NULL;
+         }
+-        for (int j = 0 ; j < nbBytes && psz_string[i] != '\0' ; j++) {
++        /* The terminating NUL is no continuation byte either: the loop
++         * stops at it, never past it */
++        for (int j = 0 ; j < nbBytes ; j++) {
+             uint8_t byte = psz_string[i++];
+-            if ((byte & 0x80) == 0) {
++            if ((byte & 0xC0) != 0x80) {
+                 LOGE("Invalid UTF byte\n");
+                 return NULL;
+             }
+-- 
+2.56.0
+
