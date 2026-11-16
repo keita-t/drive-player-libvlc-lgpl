@@ -8,9 +8,11 @@ plugins {
 val nativeOutput: File = file(providers.gradleProperty("libvlc.nativeOutput").get())
 val repository: File = file(providers.gradleProperty("libvlc.repository").get())
 val coordinates = libs.libvlc.lgpl.get()
-// Given for a variant of the recipe (build-native.sh, LIBVLC_VARIANT), which is published as a
-// version of its own: the catalog's, suffixed with the variant.
-val variant: String? = providers.gradleProperty("libvlc.variant").orNull
+// The version the native output is published as. ./libvlc_build.sh always names it, since a variant
+// of the recipe (build-native.sh, LIBVLC_VARIANT) or a -dev rebuild is published as a version of its
+// own; without it, the catalog's: the version the checkout's recipe builds.
+val publishedVersion: String = providers.gradleProperty("libvlc.version")
+    .getOrElse(coordinates.versionConstraint.requiredVersion)
 
 android {
     // The bindings' own package: their sources import org.videolan.BuildConfig and org.videolan.R.
@@ -69,14 +71,14 @@ publishing {
         register<MavenPublication>("release") {
             groupId = coordinates.module.group
             artifactId = coordinates.module.name
-            version = coordinates.versionConstraint.requiredVersion + variant?.let { "-$it" }.orEmpty()
+            version = publishedVersion
             afterEvaluate {
                 from(components["release"])
             }
             pom {
-                name.set("libVLC for Android (Drive Player build)")
+                name.set("libVLC for Android (DrivePlayer build)")
                 description.set(
-                    "libVLC and its libvlcjni bindings, built by Drive Player from VideoLAN's sources " +
+                    "libVLC and its libvlcjni bindings, built by DrivePlayer from VideoLAN's sources " +
                         "under the GNU LGPL 2.1 only, for arm64-v8a.",
                 )
                 licenses {

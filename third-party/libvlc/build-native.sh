@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds the native half of Drive Player's libVLC — libvlc.so, libvlcjni.so and libc++_shared.so
+# Builds the native half of DrivePlayer's libVLC — libvlc.so, libvlcjni.so and libc++_shared.so
 # for arm64-v8a — from sources licensed under the GNU LGPL 2.1 or more permissively, and with only
 # what the app plays.
 #
@@ -82,7 +82,7 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 #   ffmpeg (+ zlib, gsm, openjpeg, its own dependencies)  demuxing and decoding of most formats;
 #     built without encoders, muxers or network protocols
 #   dav1d                           AV1
-#   ogg opus flac speex             the Xiph formats; vorbis is added by the variant (below)
+#   ogg opus flac speex             the Xiph formats; vorbis is added by the ogg-libvlc variant (below)
 #   theora                          Theora, by VLC's module: FFmpeg's frame threads hold a picture
 #                                   until as many packets as threads followed it, which a Theora
 #                                   stream of repeated (empty) frames may never send before its end
@@ -96,11 +96,19 @@ readonly CONTRIB_PREFIX="$VLC_DIR/contrib/$TARGET_TUPLE"
 #   libxml2                         the Android font list the text renderer reads, and TTML
 #   jpeg                            linked by libvlcjni's own Android.mk
 #   libplacebo                      the OpenGL output's color conversion and tone mapping
+#   fluidlite                       MIDI, through VLC's fluidsynth module, which synthesizes the
+#                                   notes VLC's smf demuxer reads with the SoundFont the app gives it
+#                                   (`soundfont`). Built for SF3, whose Vorbis-compressed samples it
+#                                   decodes with the stb_vorbis it carries (public domain or MIT):
+#                                   no libvorbis, whose decoding FluidLite does through a static
+#                                   buffer two synthesizers loading at once would share
+#   gme (+ zlib)                    chiptune formats (NSF, SPC, GBS, VGM and VGZ, ...), emulated by
+#                                   game-music-emu; its YM2612 emulator is the LGPL Nuked
 # fontconfig is deliberately absent: without it, the text renderer reads Android's font list
 # instead of scanning every system font on first use.
 contrib_packages=(
-    ass dav1d dvbpsi ebml ffmpeg flac freetype2 fribidi gsm harfbuzz iconv jpeg libplacebo
-    libxml2 matroska mpg123 ogg openjpeg opus png soxr speex theora utfcpp vpx zlib
+    ass dav1d dvbpsi ebml ffmpeg flac fluidlite freetype2 fribidi gme gsm harfbuzz iconv jpeg
+    libplacebo libxml2 matroska mpg123 ogg openjpeg opus png soxr speex theora utfcpp vpx zlib
 )
 
 # VLC's own configure switches. Everything that would need a contrib outside the list above is
@@ -118,10 +126,10 @@ vlc_configure_args=(
     --enable-matroska --enable-dvbpsi --enable-mpg123 --enable-libass --enable-libxml2
     --enable-gles2 --enable-jpeg
     # Upstream enables these; this build leaves them out. Stream output (transcoding, recording,
-    # casting), Lua scripts, tag reading, discs, tracker and chiptune formats, teletext through
-    # zvbi, MIDI, and the network shares.
+    # casting), Lua scripts, tag reading, discs, tracker formats, teletext through zvbi, and the
+    # network shares.
     --disable-sout --disable-lua --disable-taglib --disable-bluray --disable-dvdread
-    --disable-dvdnav --disable-mod --disable-gme --disable-zvbi --disable-fluidlite
+    --disable-dvdnav --disable-mod --disable-zvbi
     --disable-smb2 --disable-live555
     # Further features off: fontconfig (see contrib_packages), the AV1 module of libaom (dav1d
     # and FFmpeg decode AV1), archives, discovery, remote access, TLS and credential stores, and
@@ -132,9 +140,11 @@ vlc_configure_args=(
     --disable-libgcrypt --disable-secret --disable-kwallet --disable-avahi --disable-realrtsp
     --disable-addonmanagermodules --disable-shout --disable-twolame --disable-shine
     --disable-x264 --disable-kate --disable-tiger --disable-libcddb
-    # The contribs above, required rather than detected.
+    # The contribs above, required rather than detected. FluidLite builds VLC's fluidsynth module
+    # (FluidSynth itself, which needs GLib, stays off above).
     --enable-dav1d --enable-flac --enable-speex --enable-ogg --enable-theora --enable-vpx --enable-soxr
     --enable-freetype --enable-fribidi --enable-harfbuzz --enable-png --enable-libplacebo
+    --enable-fluidlite --enable-gme
 )
 
 # Modules built but not linked, as extended regular expressions over the module name (the part of
@@ -168,7 +178,7 @@ module_blacklist=(
     # time seek, where FFmpeg's reads the timestamps.
     pva
     # Playlist files, external subtitle files and the video filters nothing enables.
-    playlist subtitle vobsub stl smf canvas croppadd fps freeze gaussianblur gradfun extract
+    playlist subtitle vobsub stl canvas croppadd fps freeze gaussianblur gradfun extract
     invert colorthres edgedetection anaglyph antiflicker sepia oldmovie vhs logo marq subsdelay
     vmem
     # Audio effects nothing enables, and S/PDIF passthrough.
@@ -188,22 +198,23 @@ die() {
     exit 1
 }
 
-# The build variant, from the environment: ./local_build.sh sets it for a version named after it
-# (3.7.6-29-ogg-avformat is the ogg-avformat variant of the recipe's 3.7.6-29). A variant changes
+# The build variant, from the environment: ./libvlc_build.sh sets it for a version of its own
+# (3.7.6-38-ogg-libvlc is the ogg-libvlc variant of the recipe's 3.7.6-38; the naked variant counts
+# revisions of its own, 3.7.6-naked-1, since its patches do not follow the recipe's). A variant changes
 # only which demuxer opens Ogg inputs, and with it how Vorbis is decoded, or which VLC patches apply:
-#   (none)        libVLC's own Ogg demuxer, which plays every link of a chained stream. It times
-#                 Vorbis pages through libvorbis, to seek by, so libvorbis and VLC's Vorbis
-#                 decoder are built.
-#   ogg-avformat  FFmpeg's demuxer (avformat) opens every Ogg input, whatever its codec or
+#   (none)        FFmpeg's demuxer (avformat) opens every Ogg input, whatever its codec or
 #                 declared type, and FFmpeg decodes Vorbis; libVLC's Ogg demuxer is left out.
 #                 A chained stream plays only its first link: FFmpeg's demuxer times each link
-#                 from zero and does not hand over a link whose settings change. Kept for the
-#                 comparison with libVLC's demuxer.
+#                 from zero and does not hand over a link whose settings change.
+#   ogg-libvlc    libVLC's own Ogg demuxer, which plays every link of a chained stream, as the
+#                 default build did up to 3.7.6-37. It times Vorbis pages through libvorbis, to
+#                 seek by, so libvorbis and VLC's Vorbis decoder are built. Kept for the
+#                 comparison with FFmpeg's demuxer, with the Ogg patches that demuxer needs.
 #   naked         the default build with only the VLC patches the app cannot run without
 #                 (NAKED_VLC_PATCHES): libVLC as upstream makes it, in the components and
 #                 configuration above, behind the app's callback input. libvlcjni's patches all
-#                 apply: the app calls the API they add. A build to compare a patch's effect, or the
-#                 engine's behaviour, against upstream's; never one the app ships.
+#                 apply: the app and its tests call the API they add. A build to compare a patch's
+#                 effect, or the engine's behaviour, against upstream's; never one the app ships.
 readonly LIBVLC_VARIANT="${LIBVLC_VARIANT:-}"
 
 # The mode, from the environment, as ./local_build.sh sets it:
@@ -227,22 +238,17 @@ readonly RECIPE_PATCH_AUTHOR="drive-player@localhost"
 
 select_variant() {
     case "$LIBVLC_VARIANT" in
-        "")
-            OGG_DEMUXER="libVLC's ogg"
-            contrib_packages+=(vorbis)
-            vlc_configure_args+=(--enable-vorbis)
-            ;;
-        ogg-avformat)
+        ""|naked)
             OGG_DEMUXER="FFmpeg's (avformat)"
             vlc_configure_args+=(--disable-vorbis)
             module_blacklist+=(ogg)
             ;;
-        naked)
+        ogg-libvlc)
             OGG_DEMUXER="libVLC's ogg"
             contrib_packages+=(vorbis)
             vlc_configure_args+=(--enable-vorbis)
             ;;
-        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none, ogg-avformat or naked." ;;
+        *) die "Unknown build variant '$LIBVLC_VARIANT'; expected none, ogg-libvlc or naked." ;;
     esac
 }
 
@@ -255,9 +261,12 @@ fetch_commit() {
 }
 
 # The VLC patches the naked variant applies, by number: 0001 builds the deinterlace module without
-# the GPL's yadif, which the LGPL-only build needs, and 0002 has the app's callback input reported
-# fast-seekable, without which libVLC reads the app's input as a slow stream.
-readonly NAKED_VLC_PATCHES=(0001 0002)
+# the GPL's yadif, which the LGPL-only build needs; 0002 has the app's callback input reported
+# fast-seekable, without which libVLC reads the app's input as a slow stream; and 0117 adds the
+# transfer function to libVLC's description of a video track, which libvlcjni's 0005 reads to hand
+# the app the track's colorTransfer — the bindings do not compile without it. 0117 only describes
+# what the input already knows: playback is upstream's.
+readonly NAKED_VLC_PATCHES=(0001 0002 0117)
 
 # The recipe's VLC patches the variant applies, one path a line: every one, or the naked variant's.
 recipe_vlc_patches() {
@@ -277,7 +286,7 @@ apply_patches() {
     local dir="$1"
     shift
     [ "$#" -gt 0 ] || return 0
-    git -C "$dir" -c user.name="Drive Player" -c user.email="drive-player@localhost" \
+    git -C "$dir" -c user.name="DrivePlayer" -c user.email="drive-player@localhost" \
         am -q --message-id "$@"
 }
 
@@ -367,8 +376,14 @@ RANLIB=${CROSS_TOOLS}ranlib
 LD=${CROSS_TOOLS}ld
 EOF
 
-    # libass's rules force fontconfig on Android; a command-line value overrides the makefile's.
-    local contrib_make=(make --no-print-directory -C "$CONTRIB_BUILD_DIR" TARBALLS="$TARBALLS_DIR" WITH_FONTCONFIG=0)
+    # A command-line value overrides the makefile's:
+    #  - libass's rules force fontconfig on Android;
+    #  - FluidLite decodes SF3 with its own stb_vorbis, without the libvorbis its rules depend on;
+    #  - game-music-emu's YM2612 emulator is named, so that a change of its default to the GPL
+    #    MAME one cannot slip in (the GPL guard does not see a contrib's own build options).
+    local contrib_make=(make --no-print-directory -C "$CONTRIB_BUILD_DIR" TARBALLS="$TARBALLS_DIR" WITH_FONTCONFIG=0
+        DEPS_fluidlite= "FLUIDLITE_CONF=-DENABLE_SF3=ON -DSTB_VORBIS=ON"
+        "GME_CONF=-DENABLE_UBSAN=OFF -DGME_YM2612_EMU=Nuked")
 
     "${contrib_make[@]}" list | tee "$OUT_DIR/contrib-list.txt"
     local resolved expected
@@ -532,6 +547,21 @@ verify_ffmpeg_license() {
     done
     grep -qxF '#define FFMPEG_LICENSE "LGPL version 2.1 or later"' "$config" ||
         die "FFmpeg does not report LGPL 2.1 or later."
+}
+
+# The contribs whose build options decide their license or what they depend on, as contrib_make
+# configured them: game-music-emu with the LGPL Nuked YM2612 emulator rather than the GPL MAME one,
+# and FluidLite reading SF3 with its own stb_vorbis rather than with libvorbis.
+verify_contrib_options() {
+    log "Verifying the contribs' build options"
+    local gme="$CONTRIB_BUILD_DIR/game-music-emu/vlc_build/CMakeCache.txt"
+    local fluidlite="$CONTRIB_BUILD_DIR/fluidlite/vlc_build/CMakeCache.txt"
+    [ -f "$gme" ] || die "game-music-emu's CMake cache is not at $gme"
+    grep -qE '^GME_YM2612_EMU(:[A-Z]+)?=Nuked$' "$gme" ||
+        die "game-music-emu was not configured with the Nuked YM2612 emulator."
+    [ -f "$fluidlite" ] || die "FluidLite's CMake cache is not at $fluidlite"
+    grep -qE '^ENABLE_SF3(:[A-Z]+)?=ON$' "$fluidlite" || die "FluidLite was configured without SF3."
+    grep -qE '^STB_VORBIS(:[A-Z]+)?=ON$' "$fluidlite" || die "FluidLite was configured to decode SF3 with libvorbis."
 }
 
 collect_outputs() {
@@ -788,6 +818,7 @@ build_fully() {
     build_tools
     build_contribs
     verify_ffmpeg_license
+    verify_contrib_options
     build_vlc
     generate_module_table
     link_libraries

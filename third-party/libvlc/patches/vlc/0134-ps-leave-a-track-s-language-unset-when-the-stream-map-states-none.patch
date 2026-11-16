@@ -1,0 +1,54 @@
+From 4cfe357f11f49384938341740dfc7883e3e43c23 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 11:13:20 +0900
+Subject: [PATCH] ps: leave a track's language unset when the stream map states
+ none
+
+A program stream map lists each stream with its descriptors, and a stream
+whose descriptors hold no ISO 639 language descriptor kept whatever the
+allocation of the list held where its language goes. The stream was still
+found in the map, so its track took those three bytes as its language: a
+camera's or a recorder's stream, which types its video by a map with no
+descriptors, had its video or sound named by bytes of no language, often not
+UTF-8 either. libvlcjni hands a track's language to Java as UTF-8, and the
+Java VM aborted the process on such a string when the application asked for
+the tracks.
+
+Clear a stream's descriptors before they are read, and name no language for
+a stream the map states none for.
+---
+ modules/demux/mpeg/ps.h | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/mpeg/ps.h b/modules/demux/mpeg/ps.h
+index 3ce5654..42114a8 100644
+--- a/modules/demux/mpeg/ps.h
++++ b/modules/demux/mpeg/ps.h
+@@ -714,13 +714,14 @@ static inline int ps_id_to_type( const ps_psm_t *p_psm, int i_id )
+     return 0;
+ }
+ 
++/* The language the stream map states for stream i_id, NULL when it states none */
+ static inline const uint8_t *ps_id_to_lang( const ps_psm_t *p_psm, int i_id )
+ {
+     size_t i;
+     for( i = 0; p_psm && i < p_psm->i_es; i++ )
+     {
+         if( p_psm->es[i].i_id == i_id )
+-            return p_psm->es[i].desc.lang;
++            return p_psm->es[i].desc.lang[0] ? p_psm->es[i].desc.lang : NULL;
+     }
+     return 0;
+ }
+@@ -808,6 +809,8 @@ static inline int ps_psm_fill( ps_psm_t *p_psm, block_t *p_pkt,
+         ps_es_t *p_es = &p_psm->es[ p_psm->i_es++ ];
+         p_es->i_type = p_buffer[ i_es_base  ];
+         p_es->i_id = p_buffer[ i_es_base + 1 ];
++        /* A stream the map gives no language descriptor has no language */
++        memset( &p_es->desc, 0, sizeof(p_es->desc) );
+ 
+         i_info_length = GetWBE(&p_buffer[ i_es_base + 2 ]);
+ 
+-- 
+2.56.0
+

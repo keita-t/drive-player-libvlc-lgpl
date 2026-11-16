@@ -1,0 +1,49 @@
+From faae95fa38daaca4119e730b3b5661d30c342c93 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 18:46:30 +0900
+Subject: [PATCH 122/126] fluidsynth: stop every voice and reset every channel
+ on a flush
+
+A flush released every note and reset the programs. A note released while
+the sustain pedal is down keeps sounding, so a MIDI file sought while its
+pedal was held went on playing the notes from before the seek under the
+ones after it, and the reverb and chorus rang on with them.
+
+Reset the synthesizer as a MIDI system reset does: every voice stops at
+once, each channel's program, bank and controllers start over, and the
+effects are cleared. The demuxer sets again what the file had set before
+the time sought to.
+---
+ modules/codec/fluidsynth.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/modules/codec/fluidsynth.c b/modules/codec/fluidsynth.c
+index 94126c3..6f9cafc 100644
+--- a/modules/codec/fluidsynth.c
++++ b/modules/codec/fluidsynth.c
+@@ -204,16 +204,17 @@ static void Close (vlc_object_t *p_this)
+     free (p_sys);
+ }
+ 
++/* A flush, as a seek makes: every voice stops at once, and every channel and
++ * effect starts over as the file's start found them, for the demuxer to set
++ * again what the file set before the time it went to. Releasing the notes
++ * instead left those a held sustain pedal kept sounding, and the reverb and
++ * chorus ringing with what came before the seek. */
+ static void Flush (decoder_t *p_dec)
+ {
+     decoder_sys_t *p_sys = p_dec->p_sys;
+ 
+     date_Set (&p_sys->end_date, VLC_TICK_INVALID);
+-    //fluid_synth_system_reset (p_sys->synth);
+-    fluid_synth_program_reset (p_sys->synth);
+-    for (unsigned channel = 0; channel < 16; channel++)
+-        for (unsigned note = 0; note < 128; note++)
+-            fluid_synth_noteoff (p_sys->synth, channel, note);
++    fluid_synth_system_reset (p_sys->synth);
+ }
+ 
+ static int DecodeBlock (decoder_t *p_dec, block_t *p_block)
+-- 
+2.56.0
+

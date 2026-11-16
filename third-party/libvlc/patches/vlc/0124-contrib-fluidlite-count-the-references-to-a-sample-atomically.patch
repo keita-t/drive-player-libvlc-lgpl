@@ -1,0 +1,78 @@
+From 11b6bb9d2e8e19fd1eb4185d0900d7084ec6c8d2 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 19:50:49 +0900
+Subject: [PATCH 124/126] contrib: fluidlite: count the references to a sample
+ atomically
+
+FluidLite counts the voices that play each sample of a SoundFont, and
+refuses to delete a SoundFont while a count is above zero. Synthesizers
+that share one SoundFont, each on a decoder thread of its own, raise and
+lower the same counts at once, and plain increments lose counts: one left
+above zero would keep the SoundFont from ever being deleted. Count them
+atomically.
+---
+ ...he-references-to-a-sample-atomically.patch | 39 +++++++++++++++++++
+ contrib/src/fluidlite/rules.mak               |  1 +
+ 2 files changed, 40 insertions(+)
+ create mode 100644 contrib/src/fluidlite/0002-count-the-references-to-a-sample-atomically.patch
+
+diff --git a/contrib/src/fluidlite/0002-count-the-references-to-a-sample-atomically.patch b/contrib/src/fluidlite/0002-count-the-references-to-a-sample-atomically.patch
+new file mode 100644
+index 0000000..644f93e
+--- /dev/null
++++ b/contrib/src/fluidlite/0002-count-the-references-to-a-sample-atomically.patch
+@@ -0,0 +1,39 @@
++From 2700535e68c995ca0f9e65e6fcc2e66d6f9dcbe9 Mon Sep 17 00:00:00 2001
++From: Drive Player <drive-player@localhost>
++Date: Fri, 13 Nov 2026 19:50:05 +0900
++Subject: [PATCH] Count the references to a sample atomically
++
++Synthesizers that share a SoundFont, each on a thread of its own, start and
++stop voices on the same samples at once, and a reference count raised and
++lowered from two threads without atomic operations loses counts: one left
++above zero keeps the SoundFont from being deleted. Raise and lower it
++atomically.
++---
++ src/fluid_sfont.h | 9 ++++++---
++ 1 file changed, 6 insertions(+), 3 deletions(-)
++
++diff --git a/src/fluid_sfont.h b/src/fluid_sfont.h
++index 74f33e2..781cce5 100644
++--- a/src/fluid_sfont.h
+++++ b/src/fluid_sfont.h
++@@ -65,11 +65,14 @@
++   { if ((_preset) && (_preset)->notify) { (*(_preset)->notify)(_preset,_reason,_chan); }}
++ 
++ 
++-#define fluid_sample_incr_ref(_sample) { (_sample)->refcount++; }
+++/* Atomic: synthesizers on threads of their own may share one SoundFont, and
+++ * their voices start and stop with the same samples. */
+++#define fluid_sample_incr_ref(_sample) \
+++  { __atomic_add_fetch(&(_sample)->refcount, 1, __ATOMIC_RELAXED); }
++ 
++ #define fluid_sample_decr_ref(_sample) \
++-  (_sample)->refcount--; \
++-  if (((_sample)->refcount == 0) && ((_sample)->notify)) \
+++  if ((__atomic_sub_fetch(&(_sample)->refcount, 1, __ATOMIC_ACQ_REL) == 0) \
+++      && ((_sample)->notify)) \
++     (*(_sample)->notify)(_sample, FLUID_SAMPLE_DONE);
++ 
++ 
++-- 
++2.56.0
++
+diff --git a/contrib/src/fluidlite/rules.mak b/contrib/src/fluidlite/rules.mak
+index 31e4680..09cad9c 100644
+--- a/contrib/src/fluidlite/rules.mak
++++ b/contrib/src/fluidlite/rules.mak
+@@ -23,6 +23,7 @@ DEPS_fluidlite = vorbis $(DEPS_vorbis)
+ fluidlite: fluidlite-$(FLUID_HASH).tar.xz .sum-fluidlite
+ 	$(UNPACK)
+ 	$(APPLY) $(SRC)/fluidlite/0001-pkg-config-add-FLUIDLITE_STATIC-define-when-using-th.patch
++	$(APPLY) $(SRC)/fluidlite/0002-count-the-references-to-a-sample-atomically.patch
+ 	$(call pkg_static,"fluidlite.pc.in")
+ 	$(MOVE)
+ 
+-- 
+2.56.0
+

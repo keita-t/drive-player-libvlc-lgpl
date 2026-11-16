@@ -1,0 +1,169 @@
+From a39b63ef66f6124f0083e653850b1a6d86930102 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 22:28:08 +0900
+Subject: [PATCH] vc1: time a picture by the fields it shows
+
+An elementary VC-1 stream carries no times, and its demuxer timed every
+picture a frame after the one before, at the frame rate the sequence
+header states. A film coded for interlaced display with 3:2 pulldown
+repeats a field of every other picture (RFF): such a picture shows for
+a frame and a half. The stream played some 20% fast: a sample of 98
+pictures at 30000/1001, 48 of them repeating a field, was timed 3.3 s
+long where its fields last 4.1 s, as FFmpeg times them.
+
+Read the sequence header's PULLDOWN, TFCNTRFLAG and PSF, and in each
+advanced profile picture's header, after its frame counter, the fields it
+shows: the first repeated (RFF) for an interlaced picture, or the frames
+repeated (RPTFRM) for a progressive or segmented one. Have the picture
+last that long, the time interpolated from one picture to the next go on
+by it, and the demuxer time the next picture after it.
+---
+ modules/demux/vc1.c      |  9 ++++++--
+ modules/packetizer/vc1.c | 44 ++++++++++++++++++++++++++++++++++------
+ 2 files changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/modules/demux/vc1.c b/modules/demux/vc1.c
+index 5d233f4..034342a 100644
+--- a/modules/demux/vc1.c
++++ b/modules/demux/vc1.c
+@@ -177,6 +177,9 @@ static int Demux( demux_t *p_demux)
+             es_out_SetPCR( p_demux->out, VLC_TICK_0 + p_sys->i_dts );
+             p_block_out->i_dts = VLC_TICK_0 + p_sys->i_dts;
+             p_block_out->i_pts = VLC_TICK_0 + p_sys->i_dts;
++            /* What it shows lasts as long as its fields, which the packetizer
++             * counts when the stream states them (3:2 pulldown) */
++            const vlc_tick_t i_length = p_block_out->i_length;
+ 
+             if( likely(p_sys->p_es) )
+                 es_out_Send( p_demux->out, p_sys->p_es, p_block_out );
+@@ -188,8 +191,10 @@ static int Demux( demux_t *p_demux)
+ 
+             p_block_out = p_next;
+ 
+-            if( p_sys->p_packetizer->fmt_out.video.i_frame_rate > 0 &&
+-                p_sys->p_packetizer->fmt_out.video.i_frame_rate_base > 0 )
++            if( i_length > 0 )
++                p_sys->i_dts += i_length;
++            else if( p_sys->p_packetizer->fmt_out.video.i_frame_rate > 0 &&
++                     p_sys->p_packetizer->fmt_out.video.i_frame_rate_base > 0 )
+                 p_sys->i_dts += CLOCK_FREQ *
+                     p_sys->p_packetizer->fmt_out.video.i_frame_rate_base /
+                     p_sys->p_packetizer->fmt_out.video.i_frame_rate;
+diff --git a/modules/packetizer/vc1.c b/modules/packetizer/vc1.c
+index 304f1c2..1574a50 100644
+--- a/modules/packetizer/vc1.c
++++ b/modules/packetizer/vc1.c
+@@ -73,6 +73,13 @@ struct decoder_sys_t
+         block_t *p_sh;
+         bool b_advanced_profile;
+         bool b_interlaced;
++        /* Whether its pictures say how many fields they show (PULLDOWN), each
++         * after its frame counter if it has one (TFCNTRFLAG), as the number of
++         * frames it repeats when its frames are progressive or segmented
++         * (PSF) */
++        bool b_pulldown;
++        bool b_frame_counter;
++        bool b_psf;
+         bool b_frame_interpolation;
+         bool b_range_reduction;
+         bool b_has_bframe;
+@@ -89,6 +96,9 @@ struct decoder_sys_t
+     /* Current frame being built */
+     vlc_tick_t i_frame_dts;
+     vlc_tick_t i_frame_pts;
++    /* The fields it shows: two, or three when it repeats the first (RFF), or
++     * two a frame it repeats (RPTFRM) */
++    unsigned i_frame_fields;
+     block_t    *p_frame;
+     block_t    **pp_last;
+ 
+@@ -172,6 +182,7 @@ static int Open( vlc_object_t *p_this )
+ 
+     p_sys->i_frame_dts = VLC_TICK_INVALID;
+     p_sys->i_frame_pts = VLC_TICK_INVALID;
++    p_sys->i_frame_fields = 2;
+ 
+     p_sys->b_frame = false;
+     p_sys->p_frame = NULL;
+@@ -288,6 +299,7 @@ static void PacketizeReset( void *p_private, bool b_broken )
+         p_sys->p_frame = NULL;
+         p_sys->pp_last = &p_sys->p_frame;
+         p_sys->b_frame = false;
++        p_sys->i_frame_fields = 2;
+     }
+ 
+     p_sys->i_frame_dts = VLC_TICK_INVALID;
+@@ -390,10 +402,13 @@ static block_t *ParseIDU( decoder_t *p_dec, bool *pb_ts_used, block_t *p_frag )
+         /* We can interpolate dts/pts only if we have a frame rate */
+         if( p_dec->fmt_out.video.i_frame_rate != 0 && p_dec->fmt_out.video.i_frame_rate_base != 0 )
+         {
++            /* A picture lasts the fields it shows: a film's pictures that
++             * repeat a field for 3:2 pulldown last one and a half frames */
++            p_pic->i_length = INT64_C(1000000) * p_sys->i_frame_fields *
++                              p_dec->fmt_out.video.i_frame_rate_base /
++                              p_dec->fmt_out.video.i_frame_rate / 2;
+             if( p_sys->i_interpolated_dts > VLC_TICK_INVALID )
+-                p_sys->i_interpolated_dts += INT64_C(1000000) *
+-                                             p_dec->fmt_out.video.i_frame_rate_base /
+-                                             p_dec->fmt_out.video.i_frame_rate;
++                p_sys->i_interpolated_dts += p_pic->i_length;
+ 
+             //msg_Dbg( p_dec, "-------------- XXX0 dts=%"PRId64" pts=%"PRId64" interpolated=%"PRId64,
+             //         p_pic->i_dts, p_pic->i_pts, p_sys->i_interpolated_dts );
+@@ -422,6 +437,7 @@ static block_t *ParseIDU( decoder_t *p_dec, bool *pb_ts_used, block_t *p_frag )
+         p_sys->b_frame = false;
+         p_sys->i_frame_dts = VLC_TICK_INVALID;
+         p_sys->i_frame_pts = VLC_TICK_INVALID;
++        p_sys->i_frame_fields = 2;
+         p_sys->p_frame = NULL;
+         p_sys->pp_last = &p_sys->p_frame;
+     }
+@@ -504,12 +520,12 @@ static block_t *ParseIDU( decoder_t *p_dec, bool *pb_ts_used, block_t *p_frag )
+                 msg_Dbg( p_dec, "found sequence header for advanced profile level L%d resolution %dx%d",
+                          i_level, p_es->video.i_width, p_es->video.i_height);
+ 
+-            bs_skip( &s, 1 );// pulldown
++            p_sys->sh.b_pulldown = bs_read( &s, 1 );
+             p_sys->sh.b_interlaced = bs_read( &s, 1 );
+-            bs_skip( &s, 1 );// frame counter
++            p_sys->sh.b_frame_counter = bs_read( &s, 1 );
+             p_sys->sh.b_frame_interpolation = bs_read( &s, 1 );
+             bs_skip( &s, 1 );       // Reserved
+-            bs_skip( &s, 1 );       // Psf
++            p_sys->sh.b_psf = bs_read( &s, 1 );
+ 
+             if( bs_read( &s, 1 ) )  /* Display extension */
+             {
+@@ -619,6 +635,9 @@ static block_t *ParseIDU( decoder_t *p_dec, bool *pb_ts_used, block_t *p_frag )
+             /* Simple and main profile */
+             p_sys->sh.b_advanced_profile = false;
+             p_sys->sh.b_interlaced = false;
++            p_sys->sh.b_pulldown = false;
++            p_sys->sh.b_frame_counter = false;
++            p_sys->sh.b_psf = false;
+ 
+             if( !p_sys->b_sequence_header )
+                 msg_Dbg( p_dec, "found sequence header for %s profile", i_profile == 0 ? "simple" : "main" );
+@@ -711,6 +730,19 @@ static block_t *ParseIDU( decoder_t *p_dec, bool *pb_ts_used, block_t *p_frag )
+                 else
+                     p_sys->p_frame->i_flags |= BLOCK_FLAG_TYPE_P;   /* P Skip */
+             }
++
++            if( p_sys->sh.b_frame_counter )
++                bs_skip( &s, 8 );   // TFCNTR
++            if( p_sys->sh.b_pulldown )
++            {
++                if( !p_sys->sh.b_interlaced || p_sys->sh.b_psf )
++                    p_sys->i_frame_fields = 2 * ( 1 + bs_read( &s, 2 ) );  // RPTFRM
++                else
++                {
++                    bs_skip( &s, 1 );                                    // TFF
++                    p_sys->i_frame_fields = 2 + bs_read( &s, 1 );        // RFF
++                }
++            }
+         }
+         else
+         {
+-- 
+2.56.0
+

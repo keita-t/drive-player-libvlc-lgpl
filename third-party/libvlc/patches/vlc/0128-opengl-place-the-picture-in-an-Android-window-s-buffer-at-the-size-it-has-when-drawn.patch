@@ -1,0 +1,229 @@
+From 0702d31579b857f1e1e3480b61c6789e9450e381 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 22:31:35 +0900
+Subject: [PATCH] opengl: place the picture in an Android window's buffer at
+ the size it has when drawn
+
+The OpenGL output keeps a viewport, computed for a display size, and draws
+into buffers whose size its window's consumer sets. On Android the two
+change on different threads: a TextureView's SurfaceTexture resizes the
+buffers as soon as its view is resized, on the UI thread, while the output
+places the picture for the new display size only when its thread handles
+it, some 25 to 40 ms later, and draws in between (a paused picture is
+redrawn every 80 ms). A picture drawn at the viewport of one size into a
+buffer of another showed a corner of itself magnified, or itself small in
+a corner: a view entering picture-in-picture on a moto g64 5G showed for a
+frame or two the lower left corner of a picture placed for the whole
+screen, and a view resized over and over showed a quarter of its pictures
+so (an SH-02M a few in a hundred).
+
+Keep the place with the display size it was computed for, and when a
+picture is drawn ask the surface what size the buffer in hand has
+(eglQuerySurface) and scale the place to it. The picture is whole in every
+buffer, and a buffer of an old size shown in the resized view is only
+scaled.
+
+Having the output size the buffers itself with the viewport
+(ANativeWindow_setBuffersGeometry) was tried and does not settle it: a
+driver takes its next buffer when it chooses (PowerVR as the context is
+made current), so two resizes within a frame still left a buffer of the
+first size drawn at the viewport of the second; and it took the buffers'
+format and first size from the consumer, each of which had to be given
+back by hand.
+---
+ include/vlc_opengl.h                      |  3 ++
+ modules/video_output/opengl/display.c     |  6 ++-
+ modules/video_output/opengl/egl.c         | 26 ++++++++++
+ modules/video_output/opengl/vout_helper.c | 62 +++++++++++++++++++++++
+ modules/video_output/opengl/vout_helper.h |  6 +++
+ 5 files changed, 101 insertions(+), 2 deletions(-)
+
+diff --git a/include/vlc_opengl.h b/include/vlc_opengl.h
+index fdebfeb..ecbaef2 100644
+--- a/include/vlc_opengl.h
++++ b/include/vlc_opengl.h
+@@ -68,6 +68,9 @@ struct vlc_gl_t
+                                     const int32_t *attrib_list);
+             /* call eglDestroyImageKHR() with current display, can be NULL */
+             bool (*destroyImageKHR)(vlc_gl_t *, void *image);
++            /* the size of the buffer the current context draws into now, can
++             * be NULL */
++            bool (*surfaceSize)(vlc_gl_t *, unsigned *width, unsigned *height);
+         } egl;
+         /* if ext == VLC_GL_EXT_WGL */
+         struct
+diff --git a/modules/video_output/opengl/display.c b/modules/video_output/opengl/display.c
+index ec67110..756ab3b 100644
+--- a/modules/video_output/opengl/display.c
++++ b/modules/video_output/opengl/display.c
+@@ -257,7 +257,8 @@ static int Control (vout_display_t *vd, int query, va_list ap)
+         if (vlc_gl_MakeCurrent (sys->gl) != VLC_SUCCESS)
+             return VLC_EGENERIC;
+         vout_display_opengl_SetWindowAspectRatio(sys->vgl, (float)place.width / place.height);
+-        vout_display_opengl_Viewport(sys->vgl, place.x, place.y, place.width, place.height);
++        vout_display_opengl_Place(sys->vgl, c.display.width, c.display.height,
++                                  place.x, place.y, place.width, place.height);
+         vlc_gl_ReleaseCurrent (sys->gl);
+         return VLC_SUCCESS;
+       }
+@@ -272,7 +273,8 @@ static int Control (vout_display_t *vd, int query, va_list ap)
+         if (vlc_gl_MakeCurrent (sys->gl) != VLC_SUCCESS)
+             return VLC_EGENERIC;
+         vout_display_opengl_SetWindowAspectRatio(sys->vgl, (float)place.width / place.height);
+-        vout_display_opengl_Viewport(sys->vgl, place.x, place.y, place.width, place.height);
++        vout_display_opengl_Place(sys->vgl, cfg->display.width, cfg->display.height,
++                                  place.x, place.y, place.width, place.height);
+         vlc_gl_ReleaseCurrent (sys->gl);
+         return VLC_SUCCESS;
+       }
+diff --git a/modules/video_output/opengl/egl.c b/modules/video_output/opengl/egl.c
+index ab20fb4..dbc933c 100644
+--- a/modules/video_output/opengl/egl.c
++++ b/modules/video_output/opengl/egl.c
+@@ -100,6 +100,29 @@ static void SwapBuffers (vlc_gl_t *gl)
+     eglSwapBuffers (sys->display, sys->surface);
+ }
+ 
++#if defined (USE_PLATFORM_ANDROID)
++/*
++ * The size of the buffer being drawn into. The window's consumer sizes its
++ * buffers (a TextureView's SurfaceTexture as soon as its view is resized, on
++ * the UI thread), and when a driver takes the next one is its own business:
++ * only the surface says what size the one in hand has.
++ */
++static bool SurfaceSize (vlc_gl_t *gl, unsigned *restrict width,
++                         unsigned *restrict height)
++{
++    vlc_gl_sys_t *sys = gl->sys;
++    EGLint w, h;
++
++    if (eglQuerySurface (sys->display, sys->surface, EGL_WIDTH, &w) != EGL_TRUE
++     || eglQuerySurface (sys->display, sys->surface, EGL_HEIGHT, &h) != EGL_TRUE
++     || w <= 0 || h <= 0)
++        return false;
++    *width = w;
++    *height = h;
++    return true;
++}
++#endif
++
+ static void *GetSymbol(vlc_gl_t *gl, const char *procname)
+ {
+     (void) gl;
+@@ -419,6 +442,9 @@ static int Open (vlc_object_t *obj, const struct gl_api *api)
+     gl->swap = SwapBuffers;
+     gl->getProcAddress = GetSymbol;
+     gl->egl.queryString = QueryString;
++#if defined (USE_PLATFORM_ANDROID)
++    gl->egl.surfaceSize = SurfaceSize;
++#endif
+ 
+     sys->eglCreateImageKHR = (void *)eglGetProcAddress("eglCreateImageKHR");
+     sys->eglDestroyImageKHR = (void *)eglGetProcAddress("eglDestroyImageKHR");
+diff --git a/modules/video_output/opengl/vout_helper.c b/modules/video_output/opengl/vout_helper.c
+index 13d65e0..f1befde 100644
+--- a/modules/video_output/opengl/vout_helper.c
++++ b/modules/video_output/opengl/vout_helper.c
+@@ -126,6 +126,14 @@ struct vout_display_opengl_t {
+     vlc_gl_t   *gl;
+     opengl_vtable_t vt;
+ 
++    /* Where the picture is placed, in a display of the size the place was
++     * computed for (0x0 until it is placed) */
++    struct {
++        unsigned display_width, display_height;
++        int x, y;
++        unsigned width, height;
++    } place;
++
+     video_format_t fmt;
+ 
+     GLsizei    tex_width[PICTURE_PLANE_MAX];
+@@ -1113,6 +1121,59 @@ void vout_display_opengl_Viewport(vout_display_opengl_t *vgl, int x, int y,
+     vgl->vt.Viewport(x, y, width, height);
+ }
+ 
++void vout_display_opengl_Place(vout_display_opengl_t *vgl,
++                               unsigned display_width, unsigned display_height,
++                               int x, int y, unsigned width, unsigned height)
++{
++    vgl->place.display_width = display_width;
++    vgl->place.display_height = display_height;
++    vgl->place.x = x;
++    vgl->place.y = y;
++    vgl->place.width = width;
++    vgl->place.height = height;
++    vgl->vt.Viewport(x, y, width, height);
++}
++
++/*
++ * Places the picture in the buffer it is about to be drawn into, when its
++ * surface says what size that buffer has (an Android window): at its place
++ * in the display the place was computed for, scaled to the buffer.
++ *
++ * The two sizes change on different threads. A TextureView's SurfaceTexture
++ * resizes the window's buffers as soon as its view is resized, on the UI
++ * thread; the output learns the display's new size, and places the picture
++ * for it, when its own thread comes to it, 25 to 40 ms later, drawing in
++ * between (a paused picture is redrawn every 80 ms). A viewport kept from
++ * one display size and drawn into a buffer of another shows a corner of the
++ * picture magnified, or the picture small in a corner, for a frame or two: a
++ * view entering picture-in-picture on a moto g64 5G did, about every other
++ * time. Sizing the buffers from this thread with the viewport
++ * (ANativeWindow_setBuffersGeometry) does not settle it, a driver being free
++ * to take its next buffer before the size changes (PowerVR takes it when the
++ * context is made current). Scaled to the buffer in hand, the picture is
++ * whole in every buffer, and one of an old size shown in the resized view is
++ * only scaled.
++ *
++ * Called once the buffer is cleared, which makes a driver that takes its
++ * buffer at the first drawing take it.
++ */
++static void PlaceInBuffer(vout_display_opengl_t *vgl)
++{
++    const unsigned dw = vgl->place.display_width;
++    const unsigned dh = vgl->place.display_height;
++    unsigned bw, bh;
++
++    if (dw == 0 || dh == 0 || vgl->gl->ext != VLC_GL_EXT_EGL
++     || vgl->gl->egl.surfaceSize == NULL
++     || !vgl->gl->egl.surfaceSize(vgl->gl, &bw, &bh))
++        return;
++
++    vgl->vt.Viewport((int64_t)vgl->place.x * bw / dw,
++                     (int64_t)vgl->place.y * bh / dh,
++                     ((uint64_t)vgl->place.width * bw + dw - 1) / dw,
++                     ((uint64_t)vgl->place.height * bh + dh - 1) / dh);
++}
++
+ picture_pool_t *vout_display_opengl_GetPool(vout_display_opengl_t *vgl, unsigned requested_count)
+ {
+     GL_ASSERT_NOERROR();
+@@ -1681,6 +1742,7 @@ int vout_display_opengl_Display(vout_display_opengl_t *vgl,
+        OpenGL providers can call vout_display_opengl_Display to force redraw.
+        Currently, the OS X provider uses it to get a smooth window resizing */
+     vgl->vt.Clear(GL_COLOR_BUFFER_BIT);
++    PlaceInBuffer(vgl);
+ 
+     vgl->vt.UseProgram(vgl->prgm->id);
+ 
+diff --git a/modules/video_output/opengl/vout_helper.h b/modules/video_output/opengl/vout_helper.h
+index 48014b4..089e64c 100644
+--- a/modules/video_output/opengl/vout_helper.h
++++ b/modules/video_output/opengl/vout_helper.h
+@@ -257,6 +257,12 @@ int vout_display_opengl_SetViewpoint(vout_display_opengl_t *vgl, const vlc_viewp
+ void vout_display_opengl_SetWindowAspectRatio(vout_display_opengl_t *vgl,
+                                               float f_sar);
+ 
++/* Places the picture at x, y, width x height of a display of display_width x
++ * display_height: the viewport, kept to be scaled to a buffer of another size
++ * when a picture is drawn into one. */
++void vout_display_opengl_Place(vout_display_opengl_t *vgl,
++                               unsigned display_width, unsigned display_height,
++                               int x, int y, unsigned width, unsigned height);
+ void vout_display_opengl_Viewport(vout_display_opengl_t *vgl, int x, int y,
+                                   unsigned width, unsigned height);
+ 
+-- 
+2.56.0
+

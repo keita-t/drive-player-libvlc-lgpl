@@ -1,0 +1,116 @@
+From 2d8108cd2973189f27fd410ad7d32d846ccc3a85 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 18:16:15 +0900
+Subject: [PATCH] avformat: play a format FFmpeg cannot seek in from its start
+ alone
+
+FFmpeg's demuxers of Westwood's VQA and Nintendo's THP have no seek of
+their own, keep no index and leave no timestamps to search the file by.
+FFmpeg then reads the file through looking for a time: a seek in a VQA
+cutscene landed at its end, and one in a THP film showed the picture
+stopped, or a picture away from the time. The length both state is what an
+application offers a seek by.
+
+Play such a format from its start alone, as one that states no length is:
+state no length, and have a seek to its start open the file again, without
+FFmpeg's seek, while one elsewhere fails and the file plays on from its
+start. What a demuxer can do is no part of FFmpeg's API, so the formats are
+named.
+---
+ modules/demux/avformat/demux.c | 42 ++++++++++++++++++++++++++++++----
+ 1 file changed, 37 insertions(+), 5 deletions(-)
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+index 551f740..4076d54 100644
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -91,6 +91,10 @@ struct demux_sys_t
+     int64_t     i_sv8_second;
+     int         i_sv8_distance;
+ 
++    /* Whether FFmpeg has no way to find a time in the format (FromStartOnly):
++     * it is played from its start alone */
++    bool        b_from_start;
++
+     int                i_attachments;
+     input_attachment_t **attachments;
+ 
+@@ -116,6 +120,24 @@ static void ResetTime( demux_t *p_demux, int64_t i_time );
+ static int SeekFrame( demux_t *p_demux, int64_t i_time );
+ static int ReopenAtStart( demux_t *p_demux );
+ 
++/* Whether FFmpeg's demuxer of fmt has no way to find a time: no seek of its
++ * own, no index and no timestamps to search the file by. FFmpeg then reads the
++ * file through looking for the time, and lands at its end or at a time near
++ * it: a seek in a Westwood VQA cutscene went to its end, one in a Nintendo THP
++ * film showed the picture stopped or a picture away from the time. Such a
++ * format is played from its start alone, as a format that states no length
++ * is: its length is not stated, which an application seeks by, and a seek to
++ * its start opens it again (ReopenAtStart). What a demuxer can do is no part
++ * of FFmpeg's API, so the formats are named. */
++static bool FromStartOnly( const AVInputFormat *fmt )
++{
++    static const char *const names[] = { "wsvqa", "thp" };
++    for( size_t i = 0; i < sizeof (names) / sizeof (names[0]); i++ )
++        if( !strcmp( fmt->name, names[i] ) )
++            return true;
++    return false;
++}
++
+ static vlc_fourcc_t CodecTagToFourcc( uint32_t codec_tag )
+ {
+     // convert from little-endian avcodec codec_tag to VLC native-endian fourcc
+@@ -626,6 +648,7 @@ int avformat_OpenDemux( vlc_object_t *p_this )
+     }
+     p_sys->ic = 0;
+     p_sys->fmt = fmt;
++    p_sys->b_from_start = FromStartOnly( fmt );
+     p_sys->tracks = NULL;
+     p_sys->i_ssa_order = 0;
+     p_sys->i_sv8_table = p_sys->i_sv8_second = -1;
+@@ -1540,6 +1563,13 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+         case DEMUX_SET_POSITION:
+             f = va_arg( args, double );
++            if( p_sys->b_from_start )
++            {
++                if( ReopenAtStart( p_demux ) )
++                    return VLC_EGENERIC;
++                ResetTime( p_demux, 0 );
++                return f <= 0.0 ? VLC_SUCCESS : VLC_EGENERIC;
++            }
+             i64 = p_sys->ic->duration * f + i_start_time;
+ 
+             msg_Warn( p_demux, "DEMUX_SET_POSITION: %"PRId64, i64 );
+@@ -1566,7 +1596,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+         case DEMUX_GET_LENGTH:
+             pi64 = va_arg( args, int64_t * );
+-            if( p_sys->ic->duration != (int64_t)AV_NOPTS_VALUE )
++            if( p_sys->ic->duration != (int64_t)AV_NOPTS_VALUE && !p_sys->b_from_start )
+                 *pi64 = p_sys->ic->duration * 1000000 / AV_TIME_BASE;
+             else
+                 *pi64 = 0;
+@@ -1584,13 +1614,15 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+ 
+             msg_Warn( p_demux, "DEMUX_SET_TIME: %"PRId64, i64 );
+ 
+-            if( SeekFrame( p_demux, i64 ) < 0 )
++            if( p_sys->b_from_start || SeekFrame( p_demux, i64 ) < 0 )
+             {
+                 /* A format with no way to find a time (MSN webcam, Motion
+                  * Pixels) has FFmpeg read the file through looking for it,
+-                 * which leaves it at its end. Its start is still found by
+-                 * opening it again: a seek there succeeds, and one elsewhere
+-                 * fails and has the file play on from its start. */
++                 * which leaves it at its end, and one played from its start
++                 * alone (FromStartOnly) is not sought by FFmpeg at all. Its
++                 * start is still found by opening it again: a seek there
++                 * succeeds, and one elsewhere fails and has the file play on
++                 * from its start. */
+                 if( ReopenAtStart( p_demux ) )
+                     return VLC_EGENERIC;
+                 ResetTime( p_demux, 0 );
+-- 
+2.56.0
+
