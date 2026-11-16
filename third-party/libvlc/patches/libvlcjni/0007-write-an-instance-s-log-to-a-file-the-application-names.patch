@@ -1,0 +1,206 @@
+From dfa2ba72d22b43c5c87fd58e39884670153e6bd7 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 18:09:14 +0900
+Subject: [PATCH] Write an instance's log to a file the application names
+
+libVLC says what it chose and did - its demuxer, its decoders, the codec
+MediaCodec opened, a failure - in its log alone, which its Android logger
+says in logcat. A test that reads that back from logcat loses lines: logd
+drops the lines of a process that logs as much as libVLC's debug level does
+whenever its reader falls behind, and nothing says which.
+
+Add LibVLC.setLogFile(path, level): the instance writes each message of the
+level or above to the file, appended, in place of logcat, as the Android
+logger would have said it - logcat's threadtime form under the VLC tag, the
+object and thread, module and object type before the message - one line for
+each line of the message, each line in one write. A null path stops it. The
+instance's log callback (libvlc_log_set) replaces its logger module, and is
+unset before the instance is released.
+---
+ libvlc/jni/libvlcjni.c                     | 114 +++++++++++++++++++++
+ libvlc/src/org/videolan/libvlc/LibVLC.java |  23 +++++
+ 2 files changed, 137 insertions(+)
+
+diff --git a/libvlc/jni/libvlcjni.c b/libvlc/jni/libvlcjni.c
+index a2aca34..4c29823 100644
+--- a/libvlc/jni/libvlcjni.c
++++ b/libvlc/jni/libvlcjni.c
+@@ -21,11 +21,15 @@
+ #include <assert.h>
+ #include <dirent.h>
+ #include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <pthread.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ #include <vlc/vlc.h>
+@@ -434,10 +438,120 @@ error:
+     p_obj->u.p_libvlc = p_libvlc;
+ }
+ 
++/* Where an instance writes its log once the application names a file for it
++ * (LibVLC.setLogFile), in place of logcat */
++struct vlcjni_object_sys
++{
++    int fd;
++    int level;
++};
++
++/* Each message as the Android logger says it in logcat, in logcat's threadtime
++ * form under the VLC tag, one line of it per line of the message, each in one
++ * write: lines other threads write at once come before or after it, never
++ * inside it */
++static void LogToFile(void *data, int level, const libvlc_log_t *ctx,
++                      const char *fmt, va_list ap)
++{
++    const vlcjni_object_sys *p_sys = data;
++    if (level < p_sys->level)
++        return;
++
++    char *psz_msg;
++    if (vasprintf(&psz_msg, fmt, ap) < 0)
++        return;
++
++    const char *psz_module, *psz_file, *psz_type, *psz_header;
++    unsigned i_line;
++    uintptr_t i_id;
++    libvlc_log_get_context(ctx, &psz_module, &psz_file, &i_line);
++    libvlc_log_get_object(ctx, &psz_type, &psz_header, &i_id);
++
++    char letter;
++    switch (level)
++    {
++        case LIBVLC_ERROR: letter = 'E'; break;
++        case LIBVLC_WARNING: letter = 'W'; break;
++        case LIBVLC_NOTICE: letter = 'I'; break;
++        default: letter = 'D'; break;
++    }
++
++    struct timespec now;
++    struct tm tm;
++    char date[32];
++    clock_gettime(CLOCK_REALTIME, &now);
++    localtime_r(&now.tv_sec, &tm);
++    strftime(date, sizeof (date), "%m-%d %H:%M:%S", &tm);
++    const pid_t tid = gettid();
++
++    for (char *psz_part = psz_msg, *psz_next; psz_part != NULL; psz_part = psz_next)
++    {
++        psz_next = strchr(psz_part, '\n');
++        if (psz_next != NULL)
++            *psz_next++ = '\0';
++        char *psz_out;
++        int i_out = asprintf(&psz_out, "%s.%03ld %5d %5d %c %-8s: [%0*" PRIxPTR "/%lx] %s %s: %s\n",
++                             date, now.tv_nsec / 1000000, getpid(), tid, letter, "VLC",
++                             (int) (2 * sizeof (uintptr_t)), i_id, (unsigned long) tid,
++                             psz_module ? psz_module : "?", psz_type ? psz_type : "?", psz_part);
++        if (i_out >= 0)
++        {
++            /* A line that cannot be written is lost, as logcat loses one */
++            ssize_t i_written = write(p_sys->fd, psz_out, i_out);
++            (void) i_written;
++            free(psz_out);
++        }
++    }
++    free(psz_msg);
++}
++
++/* Stop writing the instance's log to its file: it then says nothing, as
++ * libVLC leaves an instance whose log callback is unset */
++static void LogFileClose(vlcjni_object *p_obj)
++{
++    if (p_obj->p_sys == NULL)
++        return;
++    libvlc_log_unset(p_obj->u.p_libvlc);
++    close(p_obj->p_sys->fd);
++    free(p_obj->p_sys);
++    p_obj->p_sys = NULL;
++}
++
++void Java_org_videolan_libvlc_LibVLC_nativeSetLogFile(JNIEnv *env, jobject thiz,
++                                                      jstring jpath, jint level)
++{
++    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
++    if (!p_obj)
++        return;
++
++    LogFileClose(p_obj);
++    if (!jpath)
++        return;
++
++    const char *psz_path = (*env)->GetStringUTFChars(env, jpath, 0);
++    if (!psz_path)
++        return;
++    int fd = open(psz_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
++    (*env)->ReleaseStringUTFChars(env, jpath, psz_path);
++    vlcjni_object_sys *p_sys = fd >= 0 ? malloc(sizeof (*p_sys)) : NULL;
++    if (!p_sys)
++    {
++        if (fd >= 0)
++            close(fd);
++        throw_Exception(env, VLCJNI_EX_ILLEGAL_STATE, "can't open the log file");
++        return;
++    }
++    p_sys->fd = fd;
++    p_sys->level = level;
++    p_obj->p_sys = p_sys;
++    libvlc_log_set(p_obj->u.p_libvlc, LogToFile, p_sys);
++}
++
+ void Java_org_videolan_libvlc_LibVLC_nativeRelease(JNIEnv *env, jobject thiz)
+ {
+     vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
+ 
++    LogFileClose(p_obj);
+     libvlc_release(p_obj->u.p_libvlc);
+ }
+ 
+diff --git a/libvlc/src/org/videolan/libvlc/LibVLC.java b/libvlc/src/org/videolan/libvlc/LibVLC.java
+index 8c4b8a4..c5d20d6 100644
+--- a/libvlc/src/org/videolan/libvlc/LibVLC.java
++++ b/libvlc/src/org/videolan/libvlc/LibVLC.java
+@@ -144,11 +144,34 @@ public class LibVLC extends VLCObject<ILibVLC.Event> implements ILibVLC {
+         nativeSetUserAgent(name, http);
+     }
+ 
++    /** libVLC's log levels, the least that {@link #setLogFile} writes: debug, notice, warning, error. */
++    public static final int LOG_DEBUG = 0;
++    public static final int LOG_NOTICE = 2;
++    public static final int LOG_WARNING = 3;
++    public static final int LOG_ERROR = 4;
++
++    /**
++     * Has this instance write its log to the file at {@code path}, appended, in place of logcat:
++     * each message of {@code level} ({@link #LOG_DEBUG} to {@link #LOG_ERROR}) or above as the
++     * Android logger says it, one line of logcat's threadtime form under the {@code VLC} tag for each
++     * line of it, written at once. logcat drops the lines of a process that logs as much as libVLC's
++     * debug level does when its reader falls behind; a file loses none. A {@code null} path stops
++     * the writing, after which the instance logs nowhere. For a test that reads libVLC's log back,
++     * not for an application: the file is never rotated.
++     *
++     * @throws IllegalStateException when the file cannot be opened
++     */
++    public void setLogFile(String path, int level) {
++        nativeSetLogFile(path, level);
++    }
++
+     /* JNI */
+     private native void nativeNew(String[] options, String homePath);
+ 
+     private native void nativeRelease();
+ 
++    private native void nativeSetLogFile(String path, int level);
++
+     private native void nativeSetUserAgent(String name, String http);
+ 
+     private static boolean sLoaded = false;
+-- 
+2.56.0
+
