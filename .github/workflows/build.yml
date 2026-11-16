@@ -1,0 +1,114 @@
+name: Build libVLC
+
+# Builds the libVLC this branch's recipe makes (scripts/build_settings.py: the catalog's version, and
+# the variant and VideoLAN's build image in .github/libvlc-build.json), and keeps the result as the
+# run's artifact `libvlc-lgpl-<version>`:
+#   libvlc-lgpl-<version>.tar.xz   the AAR with its Maven metadata and the native output, laid out as
+#                                  a Release attaches it;
+#   sources/                       the patched libvlcjni and VLC trees it was built from and the
+#                                  contribs' source archives: the build's corresponding source;
+#   build-info.txt, SHA256SUMS     what was built, and the checksum of every file above.
+# A candidate is built on a build/<version> branch, which DrivePlayer's `libvlc_build.sh ci-build`
+# pushes from its recipe and installs the artifact of for testing. publish.yml makes a tested run's
+# archive a Release.
+
+on:
+  push:
+    branches: ['build/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # The native build takes about an hour on a hosted runner's four cores.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Read what this branch builds
+        id: settings
+        run: python3 scripts/build_settings.py | tee -a "$GITHUB_OUTPUT"
+
+      - name: Make room for the build image and the work tree
+        # The image is about 6 GB and the work tree about 3 GB; the runner's preinstalled toolchains
+        # this build does not use (.NET, Haskell, CodeQL, Android NDKs) take more than both.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+              "$ANDROID_HOME/ndk" /usr/local/share/boost
+          docker image prune --all --force >/dev/null
+          sudo mkdir -p /mnt/work
+          sudo chown "$(id -u):$(id -g)" /mnt/work
+          df -h / /mnt
+
+      - name: Build the native libraries
+        # As ./libvlc_build.sh build runs the recipe: as the container's root, which VLC's configure
+        # refuses without FORCE_UNSAFE_CONFIGURE, on a work tree of its own.
+        env:
+          IMAGE: ${{ steps.settings.outputs.image }}
+          VARIANT: ${{ steps.settings.outputs.variant }}
+        run: |
+          docker pull --quiet "$IMAGE"
+          docker run --rm --init --user 0:0 \
+              --volume /mnt/work:/work \
+              --volume "$PWD/third-party/libvlc:/recipe:ro" \
+              --env FORCE_UNSAFE_CONFIGURE=1 \
+              --env LIBVLC_VARIANT="$VARIANT" \
+              --env LIBVLC_MODE=full \
+              "$IMAGE" bash /recipe/build-native.sh
+          sudo chown -R "$(id -u):$(id -g)" /mnt/work
+          cat /mnt/work/out/build-info.txt
+
+      - name: Package the AAR
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+              "platforms;android-36" "build-tools;35.0.0" >/dev/null
+          ./gradlew --no-daemon -p third-party/libvlc/aar publish \
+              -Plibvlc.nativeOutput=/mnt/work/out \
+              -Plibvlc.repository="$RUNNER_TEMP/release/repository" \
+              -Plibvlc.version="$VERSION"
+
+      - name: Collect the artifact
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          release="$RUNNER_TEMP/release"
+          artifact="$RUNNER_TEMP/artifact"
+          mkdir -p "$release/versions/$VERSION" "$artifact/sources/contrib"
+          cp -R /mnt/work/out "$release/versions/$VERSION/out"
+          tar --owner=0 --group=0 --numeric-owner -cJf "$artifact/libvlc-lgpl-$VERSION.tar.xz" -C "$release" \
+              "repository/com/example/driveplayer/thirdparty/libvlc-lgpl/$VERSION" "versions/$VERSION/out"
+          cp /mnt/work/out/build-info.txt "$artifact/build-info.txt"
+          # The trees the libraries were built from, named after their pinned commits, as git archive
+          # writes them with the build's patches committed.
+          libvlcjni="$(sed -n 's/^libvlcjni: .* @ \([0-9a-f]\{8\}\).*/\1/p' /mnt/work/out/build-info.txt)"
+          vlc="$(sed -n 's/^VLC: .* @ \([0-9a-f]\{8\}\).*/\1/p' /mnt/work/out/build-info.txt)"
+          git -C /mnt/work/src/libvlcjni archive --prefix=libvlcjni/ HEAD |
+              xz -9 -T1 >"$artifact/sources/libvlcjni-$libvlcjni-drive-player.tar.xz"
+          git -C /mnt/work/src/libvlcjni/vlc archive --prefix=vlc/ HEAD |
+              xz -9 -T1 >"$artifact/sources/vlc-$vlc-drive-player.tar.xz"
+          # Every source archive VLC's contrib system downloaded for the build, as each project
+          # publishes it (contrib/src/<component>/SHA512SUMS checked them).
+          find /mnt/work/tarballs -maxdepth 1 -type f -exec cp {} "$artifact/sources/contrib/" \;
+          (cd "$artifact" && find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum >SHA256SUMS)
+          cat "$artifact/SHA256SUMS"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libvlc-lgpl-${{ steps.settings.outputs.version }}
+          path: ${{ runner.temp }}/artifact
+          if-no-files-found: error
+          retention-days: 90
+          # Everything in it is already compressed.
+          compression-level: 0
