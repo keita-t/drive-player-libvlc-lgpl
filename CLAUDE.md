@@ -10,5 +10,8 @@
 - Keep at least the latest stable binary release for every maintained branch public.
   Record the latest tags in `.github/release-branches.json` on all three branches.
   Only `main` should hold GitHub's repository-wide Latest designation.
+- Build releases on GitHub Actions: `build.yml` builds a `build/<version>` branch, and `publish.yml`
+  makes a tested run's archive the Release of the tag that holds its recipe and `sources/`.
+  Never attach a binary built elsewhere.
 - Run `python3 scripts/check_docs.py`, `python3 -m unittest discover -s tests`,
   and `bash -n third-party/libvlc/build-native.sh` before publishing changes.

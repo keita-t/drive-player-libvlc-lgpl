@@ -1,4 +1,4 @@
-<!-- source-sha256: 9ee4543cc25bd6562abb23ce6ff99fbe023ffd4e28b39575198335dc710283d0 -->
+<!-- source-sha256: 9a2518d12741c5c4179101471348b7ed274ab3dc93e20c92f7b106189275eaee -->
 
 # DrivePlayer 向け libVLC — 対応するソースコード
 
@@ -147,23 +147,28 @@ python3 -m unittest discover -s tests
 ビルドコマンドを検査します。翻訳の意味の正しさは判定しないため、ハッシュを更新する前に両言語を
 レビューしてください。GitHub Actions が 3 ブランチで検査を実行します。
 
-新しい Release では、対応する完全なソースを対象ブランチにコミットし、そのコミットに
-`libvlc-lgpl-<version>` タグを付けます。そのタグのレシピでバイナリーアーカイブをビルド・検証し、
-既存 Release のアーカイブ配置を維持したうえで、対象ブランチを指定して公開します。
+ビルドは GitHub Actions で行います。`build.yml` は、`build/<version>` ブランチの push または手動実行で、
+ブランチのレシピを VideoLAN のイメージでビルドします。ビルドする内容は `scripts/build_settings.py` が読み、
+バージョンは `gradle/libs.versions.toml`、バリアントとイメージの digest は `.github/libvlc-build.json` から取ります。
+実行は、Release に添付するアーカイブ（`libvlc-lgpl-<version>.tar.xz`）、ビルドの対応ソース（`sources/`：
+パッチを適用した libvlcjni と VLC のツリー、contrib のアーカイブ）、`build-info.txt` を、artifact
+`libvlc-lgpl-<version>` として 90 日間保持します。DrivePlayer の `libvlc_build.sh ci-build` は、自身のレシピから
+ビルドブランチを push し、実行の完了を待って、試験のために artifact をインストールします。
+
+試験を終えたビルドは、同じ実行から公開します。ビルドのブランチに、実行がビルドしたレシピ、実行の `sources/` と
+`sources/SHA256SUMS`、日英 README の Release 表、`.github/release-branches.json` のそのブランチの項目、
+`.github/release-notes.md` の Release notes（ブランチ、ソースタグ、ビルドオプション、アーカイブの内容、SHA-256）を
+コミットします。そのコミットに `libvlc-lgpl-<version>` タグを付けて push し、公開します。
 
 ```bash
-branch=ogg-libvlc # main, ogg-libvlc or naked
-tag='libvlc-lgpl-<version>'
-gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+gh workflow run publish.yml -f tag='libvlc-lgpl-<version>' -f run='<build.yml run ID>'
 ```
 
-実行前に `<version>` を実際のバージョン（必要なバリアント接尾辞を含む）に置き換えます。
-Release notes にはブランチ、ソースタグ、ビルドオプション、アーカイブの内容、SHA-256 を記載します。
-`main` には `--latest=true`、比較用には `--latest=false` を使います。3 ブランチすべての
-`.github/release-branches.json` の該当項目と、日英 README の Release 表を更新します。
-各ブランチの最新の安定版 Release とバイナリーを少なくとも 1 つ公開状態に保ち、この保守作業で過去の
-Release は削除しません。日次・手動チェックで、公開状態、添付ファイル、タグがブランチの履歴に含まれること、
+`publish.yml` は、実行がタグのレシピで成功したことと、タグの `sources/` が実行のものであることを確認してから、
+実行のアーカイブを添付した Release を `libvlc-lgpl <version> (<branch>)` の題名で作成します。`main` の Release は
+リポジトリ全体の Latest になります。その後ブランチを push し、残り 2 ブランチの `.github/release-branches.json` に
+タグを記録します。各ブランチの最新の安定版 Release とバイナリーを少なくとも 1 つ公開状態に保ち、この保守作業で
+過去の Release は削除しません。日次・手動チェックで、公開状態、添付ファイル、タグがブランチの履歴に含まれること、
 リポジトリ全体の Latest が `main` の Release であることを確認します。
 
 ## ライセンス

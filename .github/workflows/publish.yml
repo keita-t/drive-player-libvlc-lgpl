@@ -1,0 +1,74 @@
+name: Publish libVLC
+
+# Makes a tested build a Release: the archive build.yml's run built, attached to the tag of the
+# commit that holds its complete corresponding source. Run it once the tag is pushed, before the
+# branch is (the Release checks require each branch's recorded tag to be released):
+#   gh workflow run publish.yml -f tag=libvlc-lgpl-<version> -f run=<build.yml run ID>
+# It refuses a run whose recipe is not the tag's, or whose sources are not the tag's sources/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag to publish: libvlc-lgpl-<version>'
+        required: true
+      run:
+        description: 'The ID of the successful build.yml run whose archive the Release attaches'
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      RUN: ${{ inputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read what the tag builds
+        id: settings
+        run: |
+          python3 scripts/build_settings.py | tee -a "$GITHUB_OUTPUT"
+          [ "$(python3 scripts/build_settings.py | sed -n 's/^tag=//p')" = "$TAG" ] ||
+              { echo "$TAG does not name the version its catalog holds" >&2; exit 1; }
+
+      - name: Check the run against the tag
+        run: |
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN")"
+          [ "$(jq -r .path <<<"$run")" = .github/workflows/build.yml ] ||
+              { echo "run $RUN is not a build.yml run" >&2; exit 1; }
+          [ "$(jq -r .conclusion <<<"$run")" = success ] ||
+              { echo "run $RUN did not succeed" >&2; exit 1; }
+          built="$(jq -r .head_sha <<<"$run")"
+          # The recipe the run built is the tag's: its patches, build script, packaging, catalog,
+          # Gradle wrapper and build settings.
+          git diff --quiet "$built" HEAD -- third-party gradle gradlew .github/libvlc-build.json ||
+              { echo "the tag's recipe is not the one run $RUN built (commit $built)" >&2; exit 1; }
+
+      - name: Check the artifact against the tag
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name "libvlc-lgpl-$VERSION" --dir "$RUNNER_TEMP/artifact"
+          python3 scripts/verify_artifacts.py "$RUNNER_TEMP/artifact" "$VERSION"
+
+      - name: Create the Release
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+          BRANCH: ${{ steps.settings.outputs.branch }}
+        run: |
+          latest=false
+          [ "$BRANCH" != main ] || latest=true
+          gh release create "$TAG" "$RUNNER_TEMP/artifact/libvlc-lgpl-$VERSION.tar.xz" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --target "$BRANCH" \
+              --title "libvlc-lgpl $VERSION ($BRANCH)" --notes-file .github/release-notes.md \
+              --latest="$latest"
