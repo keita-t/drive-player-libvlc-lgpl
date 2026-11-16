@@ -140,24 +140,32 @@ The check records the English source's SHA-256 in each Japanese document, detect
 updates, and checks patch coverage, links and build commands. It does not assess translation quality;
 review both languages before refreshing the hashes. GitHub Actions runs the checks for all three branches.
 
-For a new release, first commit its complete corresponding source on the appropriate branch and tag that
-commit as `libvlc-lgpl-<version>`. Build and verify the binary archive using that tag's recipe and retain the
-archive layout described by the existing release. Publish the archive with that branch as the target:
+Builds run on GitHub Actions. `build.yml` builds a branch's recipe in VideoLAN's image whenever a
+`build/<version>` branch is pushed, or when it is run by hand. `scripts/build_settings.py` reads what it builds:
+the version from `gradle/libs.versions.toml`, and the variant and the image's digest from
+`.github/libvlc-build.json`. The run keeps, as its artifact `libvlc-lgpl-<version>` for 90 days, the archive a
+Release attaches (`libvlc-lgpl-<version>.tar.xz`), the build's corresponding source (`sources/`: the patched
+libvlcjni and VLC trees and the contribs' archives) and `build-info.txt`. DrivePlayer's
+`libvlc_build.sh ci-build` pushes the build branch from its recipe, waits for the run and installs the
+artifact for testing.
+
+A tested build is published from the same run. On the build's branch, commit the recipe the run built, the
+run's `sources/` with `sources/SHA256SUMS`, both README release tables, the branch's entry in
+`.github/release-branches.json`, and the Release notes in `.github/release-notes.md` (the branch, source tag,
+build options, archive contents and SHA-256). Tag that commit `libvlc-lgpl-<version>`, push the tag, and
+publish:
 
 ```bash
-branch=ogg-libvlc # main, ogg-libvlc or naked
-tag='libvlc-lgpl-<version>'
-gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+gh workflow run publish.yml -f tag='libvlc-lgpl-<version>' -f run='<build.yml run ID>'
 ```
 
-Replace `<version>` with the actual version (including any variant suffix) before running the command.
-Release notes should identify the branch, source tag, build options, archive contents and SHA-256.
-For `main`, use `--latest=true`; comparison releases use `--latest=false`. Update the branch's entry in
-`.github/release-branches.json` on all three branches, along with both README release tables. Keep at least
-the newest stable release and its binary asset public for each branch; do not delete older releases as part
-of this maintenance. The daily and manual release checks verify publication, assets, branch ancestry and
-that the repository-wide Latest release belongs to `main`.
+`publish.yml` checks that the run succeeded on the tag's recipe and that the tag's `sources/` are the run's,
+then creates the Release with the run's archive, titled `libvlc-lgpl <version> (<branch>)`; a release of
+`main` becomes the repository-wide Latest. Then push the branch, and record the tag in
+`.github/release-branches.json` on the other two branches. Keep at least the newest stable release and its
+binary asset public for each branch; do not delete older releases as part of this maintenance. The daily and
+manual release checks verify publication, assets, branch ancestry and that the repository-wide Latest
+release belongs to `main`.
 
 ## Licenses
 
