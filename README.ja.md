@@ -1,4 +1,4 @@
-<!-- source-sha256: 9a2518d12741c5c4179101471348b7ed274ab3dc93e20c92f7b106189275eaee -->
+<!-- source-sha256: eaa3d5c54bec27b72d659afb61b2ffe69471edb2952d3846412c41d47fd50bdb -->
 
 # DrivePlayer 向け libVLC — 対応するソースコード
 
@@ -17,11 +17,12 @@ GitHub Release で入手できる状態に保ちます。3.7.6-49 以降の Rele
 | ライブラリーのバージョン | タグ | ブランチ | 内容 |
 |---|---|---|---|
 | 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | アプリが配布するビルド。[main/PATCHES.ja.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.ja.md) のパッチを含み、タグの GitHub Release にビルド済みライブラリーを添付しています |
-| 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | libVLC 自身の Ogg demuxer と libvorbis を使う最新の公開済みビルド。当初は通常のアプリ用ビルドとして公開しました |
-| 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | アプリの動作に必須の VLC パッチと Java bindings のパッチだけを含む比較用ビルド |
+| 3.7.6-49-ogg-libvlc | [`libvlc-lgpl-3.7.6-49-ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49-ogg-libvlc) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | 3.7.6-49 のレシピで libVLC 自身の Ogg demuxer を使い、libvorbis をビルドする比較用ビルド。パッチは `main` と同じです |
+| 3.7.6-naked-1 | [`libvlc-lgpl-3.7.6-naked-1`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-naked-1) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | アプリの動作に必須の VLC パッチと Java bindings のパッチだけを含む比較用ビルド |
 
 各ブランチはレシピとバージョンを独立して追跡するため、最新 Release のバージョン番号をそろえる必要は
-ありません。`ogg-libvlc` は既存の 3.7.6-37 タグ、`naked` は 3.7.6-29-naked タグから分岐します。
+ありません。`ogg-libvlc` はレシピの revision に従い（3.7.6-49-ogg-libvlc は 3.7.6-49 のもの）、`naked` は
+3.7.6-naked-1 から独自の revision を数えます。それ以前の Release（3.7.6-37 と 3.7.6-29-naked）も残しています。
 旧 `variants` ブランチは履歴として保持し、新しい比較用ビルドはそれぞれの専用ブランチで管理します。
 既存タグとバイナリーの名前・内容は維持します。
 
@@ -115,9 +116,9 @@ docker run --rm --init \
 レシピは同じソースから比較用バリアントもビルドできます。アプリが配布するのは既定のビルドです。
 `--env LIBVLC_VARIANT=ogg-libvlc` では FFmpeg の代わりに libVLC の Ogg demuxer を使い、libvorbis と
 VLC の Vorbis decoder もビルドします。これは 3.7.6-37 までの既定の構成です。
-`--env LIBVLC_VARIANT=naked` では、VLC のパッチをアプリに必須の 0001 と 0002 に限定します。
-3.7.6-29-naked と同じ選び方ですが、このレシピでは Ogg は既定ビルド同様に FFmpeg で開き、
-3.7.6-29-naked では libVLC 自身の demuxer で開いていた点が異なります。
+`--env LIBVLC_VARIANT=naked` では、VLC のパッチをアプリとその試験に必須の 0001、0002、0117 に限定し、
+Ogg は既定ビルド同様に FFmpeg で開きます。各バリアントはそれぞれのブランチから、3.7.6-49-ogg-libvlc と
+3.7.6-naked-1 として公開しています。
 
 `build-native.sh` は固定した libvlcjni・VLC のコミットと各コンポーネントのアーカイブを上流から取得します。
 このリポジトリに収録したコピーを使う場合は、次のように準備します。

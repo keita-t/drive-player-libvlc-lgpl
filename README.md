@@ -15,11 +15,12 @@ releases of earlier builds, other than the ones listed here, were withdrawn, and
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
 | 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
-| 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
-| 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
+| 3.7.6-49-ogg-libvlc | [`libvlc-lgpl-3.7.6-49-ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49-ogg-libvlc) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | A comparison build of the 3.7.6-49 recipe that opens Ogg with libVLC's own demuxer and builds libvorbis, with the same patches as `main` |
+| 3.7.6-naked-1 | [`libvlc-lgpl-3.7.6-naked-1`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-naked-1) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
 
 The branches track different recipes and versions independently; their latest releases do not have to share a
-version number. `ogg-libvlc` starts from the existing 3.7.6-37 tag and `naked` from 3.7.6-29-naked. The old
+version number. `ogg-libvlc` follows the recipe's revision (3.7.6-49-ogg-libvlc is 3.7.6-49's), and `naked`
+counts revisions of its own from 3.7.6-naked-1; their earlier releases, 3.7.6-37 and 3.7.6-29-naked, remain. The old
 `variants` branch is retained as historical source; new comparison builds belong on their named branch.
 Existing tags and binary assets retain their original names and contents.
 
@@ -113,8 +114,8 @@ with platform 36 (`ANDROID_HOME` set):
 The recipe also builds two variants for comparison, from the same sources; the app ships the default build.
 With `--env LIBVLC_VARIANT=ogg-libvlc`, libVLC's own demuxer opens Ogg instead of FFmpeg's, and libvorbis and
 VLC's Vorbis decoder are built, as the default build did up to 3.7.6-37. With `--env LIBVLC_VARIANT=naked`, only
-the VLC patches the app cannot run without (0001 and 0002) are applied, as 3.7.6-29-naked was built; Ogg is opened
-as in the default build, where 3.7.6-29-naked opened it with libVLC's own demuxer.
+the VLC patches the app and its tests cannot run without (0001, 0002 and 0117) are applied, and Ogg is opened as in
+the default build. Each variant is published from its own branch, as 3.7.6-49-ogg-libvlc and 3.7.6-naked-1.
 
 `build-native.sh` fetches the pinned libvlcjni and VLC commits and the component archives from their
 upstream locations. To build from this repository's copies instead:
