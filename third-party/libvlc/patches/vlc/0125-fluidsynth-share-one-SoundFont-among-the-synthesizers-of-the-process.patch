@@ -1,0 +1,181 @@
+From d68d3124d91bdd39913eb0ee57c57ddc5194d7ac Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 13 Nov 2026 19:53:03 +0900
+Subject: [PATCH 125/126] fluidsynth: share one SoundFont among the
+ synthesizers of the process
+
+A synthesizer that loads a SoundFont holds all of it in memory of its own:
+its samples, and every instrument once over for each preset zone that
+plays it. GeneralUser GS, a General MIDI bank of 32 MB of samples, takes
+some 90 MB a synthesizer. A track playing and the next one made ready, or
+two crossfading, held it twice, and each spent the time loading it: for a
+SoundFont of compressed samples (SF3), decoding them all, three seconds on
+an SH-02M.
+
+Load the SoundFont a synthesizer is given by path once for the process,
+with a synthesizer of its own that then lets go of it, hand it to every
+synthesizer given the same path, and delete it when the last one lets go
+of it; the next synthesizer loads it again. A synthesizer lets go of it
+with every voice off, so that no voice plays its samples. A synthesizer
+given another path while one is held loads that one for itself, as every
+synthesizer did. Playing reads the SoundFont alone, but for the count of
+the voices playing each sample, which FluidLite keeps atomically.
+
+Two synthesizers on threads of their own playing one shared SoundFont at
+once, for 46 seconds each, took 1.5 MB more than one, and the SoundFont
+was deleted whole once both had let go of it (SH-02M, moto g64 5G).
+---
+ modules/codec/fluidsynth.c | 107 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 104 insertions(+), 3 deletions(-)
+
+diff --git a/modules/codec/fluidsynth.c b/modules/codec/fluidsynth.c
+index 6f9cafc..392e185 100644
+--- a/modules/codec/fluidsynth.c
++++ b/modules/codec/fluidsynth.c
+@@ -28,6 +28,7 @@
+ #include <vlc_codec.h>
+ #include <vlc_dialog.h>
+ 
++#include <assert.h>
+ #include <unistd.h>
+ #if defined( _POSIX_VERSION ) && !defined(__ANDROID__)
+ # include <glob.h>
+@@ -93,9 +94,92 @@ struct decoder_sys_t
+     fluid_settings_t *settings;
+     fluid_synth_t    *synth;
+     int               soundfont;
++    fluid_sfont_t    *shared; /* the process's SoundFont, if the synthesizer plays it */
+     date_t            end_date;
+ };
+ 
++/*
++ * One SoundFont for every synthesizer of the process.
++ *
++ * A synthesizer that loads a SoundFont holds all of it in memory of its own:
++ * its samples, and every instrument once over for each preset zone that plays
++ * it, which for a General MIDI bank of 32 MB of samples is some 90 MB. Two
++ * synthesizers at once — a track playing and the next one made ready, or two
++ * crossfading — held it twice, and each spent the time loading it, which for
++ * a SoundFont of compressed samples is the time decoding them all. So the
++ * SoundFont a synthesizer is given by path is loaded once for the process, by
++ * a synthesizer of its own that then lets go of it, handed to every
++ * synthesizer given the same path, and deleted when the last one lets go of
++ * it; the next synthesizer loads it again. A synthesizer given another path
++ * while one is held loads that one for itself, as every synthesizer did.
++ *
++ * The SoundFont is read alone once loaded: its presets, instruments and
++ * samples are not changed by playing them, but for the count of the voices
++ * playing each sample, which FluidLite keeps atomically.
++ */
++static struct
++{
++    vlc_mutex_t    lock;
++    char          *path;
++    fluid_sfont_t *sfont;
++    unsigned       users;
++} shared = { VLC_STATIC_MUTEX, NULL, NULL, 0 };
++
++/* The process's SoundFont from path, or NULL if it cannot be loaded or another
++ * is held. */
++static fluid_sfont_t *AcquireSoundFont (vlc_object_t *obj, const char *path)
++{
++    fluid_sfont_t *sfont = NULL;
++
++    vlc_mutex_lock (&shared.lock);
++    if (shared.sfont != NULL)
++    {
++        if (strcmp (shared.path, path) == 0)
++            sfont = shared.sfont;
++    }
++    else
++    {
++        char *copy = strdup (path);
++        fluid_settings_t *settings = new_fluid_settings ();
++        fluid_synth_t *loader = new_fluid_synth (settings);
++        int id = (copy != NULL) ? fluid_synth_sfload (loader, path, 0) : -1;
++        if (id != -1)
++        {
++            sfont = fluid_synth_get_sfont_by_id (loader, id);
++            /* The loader deletes what it holds, and it holds this no more */
++            fluid_synth_remove_sfont (loader, sfont);
++            shared.sfont = sfont;
++            shared.path = copy;
++        }
++        else
++            free (copy);
++        delete_fluid_synth (loader);
++        delete_fluid_settings (settings);
++    }
++    if (sfont != NULL)
++        shared.users++;
++    vlc_mutex_unlock (&shared.lock);
++
++    if (sfont == NULL)
++        msg_Dbg (obj, "the SoundFont %s is not the process's", path);
++    return sfont;
++}
++
++static void ReleaseSoundFont (vlc_object_t *obj, fluid_sfont_t *sfont)
++{
++    vlc_mutex_lock (&shared.lock);
++    assert (sfont == shared.sfont && shared.users > 0);
++    if (--shared.users == 0)
++    {
++        if (sfont->free != NULL && sfont->free (sfont) != 0)
++            msg_Err (obj, "the SoundFont is still played: kept");
++        free (shared.path);
++        shared.path = NULL;
++        shared.sfont = NULL;
++    }
++    vlc_mutex_unlock (&shared.lock);
++}
++
+ 
+ static int  DecodeBlock (decoder_t *p_dec, block_t *p_block);
+ static void Flush (decoder_t *);
+@@ -114,12 +198,19 @@ static int Open (vlc_object_t *p_this)
+     p_sys->settings = new_fluid_settings ();
+     p_sys->synth = new_fluid_synth (p_sys->settings);
+     p_sys->soundfont = -1;
++    p_sys->shared = NULL;
+ 
+     char *font_path = var_InheritString (p_this, "soundfont");
+     if (font_path != NULL)
+     {
+-        msg_Dbg (p_this, "loading sound fonts file %s", font_path);
+-        p_sys->soundfont = fluid_synth_sfload (p_sys->synth, font_path, 1);
++        p_sys->shared = AcquireSoundFont (p_this, font_path);
++        if (p_sys->shared != NULL)
++            p_sys->soundfont = fluid_synth_add_sfont (p_sys->synth, p_sys->shared);
++        else
++        {
++            msg_Dbg (p_this, "loading sound fonts file %s", font_path);
++            p_sys->soundfont = fluid_synth_sfload (p_sys->synth, font_path, 1);
++        }
+         if (p_sys->soundfont == -1)
+             msg_Err (p_this, "cannot load sound fonts file %s", font_path);
+         free (font_path);
+@@ -198,9 +289,19 @@ static void Close (vlc_object_t *p_this)
+ {
+     decoder_sys_t *p_sys = ((decoder_t *)p_this)->p_sys;
+ 
+-    fluid_synth_sfunload (p_sys->synth, p_sys->soundfont, 1);
++    if (p_sys->shared != NULL)
++    {
++        /* Every voice off, so that none plays a sample of the SoundFont, and
++         * the SoundFont out of the synthesizer, which deletes what it holds */
++        fluid_synth_system_reset (p_sys->synth);
++        fluid_synth_remove_sfont (p_sys->synth, p_sys->shared);
++    }
++    else
++        fluid_synth_sfunload (p_sys->synth, p_sys->soundfont, 1);
+     delete_fluid_synth (p_sys->synth);
+     delete_fluid_settings (p_sys->settings);
++    if (p_sys->shared != NULL)
++        ReleaseSoundFont (p_this, p_sys->shared);
+     free (p_sys);
+ }
+ 
+-- 
+2.56.0
+

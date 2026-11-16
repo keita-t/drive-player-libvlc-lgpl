@@ -2,10 +2,12 @@
 
 English | [日本語](README.ja.md)
 
-This branch (`ogg-libvlc`) holds the complete corresponding source of libVLC 3.7.6-37 for DrivePlayer,
-`com.example.driveplayer.thirdparty:libvlc-lgpl`, for arm64-v8a under the GNU LGPL 2.1 or more permissive
-licenses. It retains the last published regular build using libVLC's own Ogg demuxer and libvorbis.
-The app's current build is tracked separately on `main`.
+This branch (`ogg-libvlc`) holds the complete corresponding source of the comparison build
+`com.example.driveplayer.thirdparty:libvlc-lgpl` 3.7.6-49-ogg-libvlc, a build of libVLC and its Java bindings
+(libvlcjni) made from sources under the GNU Lesser General Public License 2.1 or more permissive licenses only,
+for arm64-v8a. It is the ogg-libvlc variant of the recipe of 3.7.6-49, the build the app ships: the same patches,
+with libVLC's own demuxer opening Ogg and libvorbis built, where the app's build uses FFmpeg's. The app does not
+ship this build; its build is tracked on `main`.
 
 Each published build of the library has a tag named after its version (`libvlc-lgpl-<version>`), holding exactly the
 sources, patches and build scripts that produced that build. Each maintained branch keeps its latest
@@ -15,11 +17,12 @@ releases of earlier builds, other than the ones listed here, were withdrawn, and
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
 | 3.7.6-49 | [`libvlc-lgpl-3.7.6-49`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49) | [`main`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/main) | The build the app ships, with the patches listed in [main/PATCHES.md](https://github.com/keita-t/drive-player-libvlc-lgpl/blob/main/PATCHES.md). The built library is attached to the GitHub release of its tag |
-| 3.7.6-37 | [`libvlc-lgpl-3.7.6-37`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-37) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | The latest published build using libVLC's own Ogg demuxer and libvorbis; originally published as a regular app build |
-| 3.7.6-29-naked | [`libvlc-lgpl-3.7.6-29-naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-29-naked) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
+| 3.7.6-49-ogg-libvlc | [`libvlc-lgpl-3.7.6-49-ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-49-ogg-libvlc) | [`ogg-libvlc`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/ogg-libvlc) | A comparison build of the 3.7.6-49 recipe that opens Ogg with libVLC's own demuxer and builds libvorbis, with the same patches as `main` |
+| 3.7.6-naked-1 | [`libvlc-lgpl-3.7.6-naked-1`](https://github.com/keita-t/drive-player-libvlc-lgpl/releases/tag/libvlc-lgpl-3.7.6-naked-1) | [`naked`](https://github.com/keita-t/drive-player-libvlc-lgpl/tree/naked) | A comparison build with only the VLC patches the app cannot run without, plus the Java binding patches |
 
 The branches track different recipes and versions independently; their latest releases do not have to share a
-version number. `ogg-libvlc` starts from the existing 3.7.6-37 tag and `naked` from 3.7.6-29-naked. The old
+version number. `ogg-libvlc` follows the recipe's revision (3.7.6-49-ogg-libvlc is 3.7.6-49's), and `naked`
+counts revisions of its own from 3.7.6-naked-1; their earlier releases, 3.7.6-37 and 3.7.6-29-naked, remain. The old
 `variants` branch is retained as historical source; new comparison builds belong on their named branch.
 Existing tags and binary assets retain their original names and contents.
 
@@ -29,13 +32,13 @@ Existing tags and binary assets retain their original names and contents.
 |---|---|
 | `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with DrivePlayer's patches applied |
 | `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and DrivePlayer's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
-| `sources/contrib/` | The source archives of the 27 third-party components linked into `libvlc.so`, as published by each project |
+| `sources/contrib/` | The source archives of the 29 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
 | `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
 | `third-party/libvlc/patches/` | DrivePlayer's modifications to libvlcjni and VLC, as `git am` patches |
 | `PATCHES.md` | What each patch solved and what it changes |
 | `third-party/libvlc/aar/` | The Gradle build that packages the libraries and the Java bindings as an Android library (AAR) |
-| `gradle/`, `gradlew` | The Gradle wrapper (Gradle 8.7) and the version entries the AAR build reads |
+| `gradle/`, `gradlew` | The Gradle wrapper (Gradle 8.13) and the version entries the AAR build reads |
 
 The layout of `third-party/libvlc/` and `gradle/` matches the DrivePlayer source tree, where the same
 files are used unchanged.
@@ -57,7 +60,7 @@ it carries source patches for behaviour the app relies on.
 
 ### Patches
 
-`patches/libvlcjni/` (4 patches) is applied to libvlcjni, and `patches/vlc/` (107 patches) to VLC after the patches
+`patches/libvlcjni/` (7 patches) is applied to libvlcjni, and `patches/vlc/` (130 patches) to VLC after the patches
 libvlcjni itself carries, all with `git am`. [PATCHES.md](PATCHES.md) lists each with the problem it solved and the
 change it makes:
 
@@ -65,18 +68,20 @@ change it makes:
 |---|---|
 | [License](PATCHES.md#license) | 2 |
 | [Reading media through the app](PATCHES.md#reading-media-through-the-app) | 3 |
-| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 13 |
-| [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 3 |
-| [Audio](PATCHES.md#audio) | 12 |
+| [Opening and reading streams](PATCHES.md#opening-and-reading-streams) | 16 |
+| [Video tracks and the app's window](PATCHES.md#video-tracks-and-the-apps-window) | 7 |
+| [Audio](PATCHES.md#audio) | 13 |
 | [Pause](PATCHES.md#pause) | 2 |
-| [Seeking](PATCHES.md#seeking) | 17 |
-| [Times and lengths](PATCHES.md#times-and-lengths) | 16 |
-| [Elementary video streams](PATCHES.md#elementary-video-streams) | 8 |
+| [Seeking](PATCHES.md#seeking) | 20 |
+| [Times and lengths](PATCHES.md#times-and-lengths) | 17 |
+| [Elementary video streams](PATCHES.md#elementary-video-streams) | 9 |
 | [Video size and pixel aspect](PATCHES.md#video-size-and-pixel-aspect) | 11 |
-| [Video output](PATCHES.md#video-output) | 4 |
-| [Hardware decoders](PATCHES.md#hardware-decoders) | 5 |
-| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 10 |
-| [Ogg, with libVLC's own demuxer](PATCHES.md#ogg-with-libvlcs-own-demuxer) | 5 |
+| [Video output](PATCHES.md#video-output) | 5 |
+| [Hardware decoders](PATCHES.md#hardware-decoders) | 6 |
+| [FFmpeg's decoders](PATCHES.md#ffmpegs-decoders) | 12 |
+| [Ogg, with libVLC's own demuxer](PATCHES.md#ogg-with-libvlcs-own-demuxer) | 6 |
+| [MIDI and game music](PATCHES.md#midi-and-game-music) | 7 |
+| [The log](PATCHES.md#the-log) (used by the app's tests, not by the app) | 1 |
 
 ## Build
 
@@ -93,6 +98,7 @@ docker run --rm --init \
     --user "$(id -u):$(id -g)" \
     --volume "$PWD/work:/work" \
     --volume "$PWD/third-party/libvlc:/recipe:ro" \
+    --env LIBVLC_VARIANT=ogg-libvlc \
     registry.videolan.org/vlc-debian-android@sha256:5f041ff50465aea803b93855d463f4b98f1d9f3be6628e304af2bf3fded6f98e \
     bash /recipe/build-native.sh
 ```
@@ -107,10 +113,10 @@ with platform 36 (`ANDROID_HOME` set):
     -Plibvlc.repository="$PWD/repository"
 ```
 
-This branch retains the 3.7.6-37 recipe. Its default opens Ogg with libVLC's own demuxer and builds
-libvorbis and VLC's Vorbis decoder. The existing release keeps its original version `3.7.6-37`, without a
-variant suffix. This historical recipe calls the FFmpeg comparison variant `ogg-avformat`; its default
-is already the build tracked by the `ogg-libvlc` branch.
+Use `LIBVLC_VARIANT=ogg-libvlc` for this branch's native build, as in the command above; the AAR is published
+under the version `gradle/libs.versions.toml` names. libVLC's own demuxer opens Ogg instead of FFmpeg's, and
+libvorbis and VLC's Vorbis decoder are built, as the app's build did up to 3.7.6-37. Every patch the app's build
+applies is applied here too.
 
 `build-native.sh` fetches the pinned libvlcjni and VLC commits and the component archives from their
 upstream locations. To build from this repository's copies instead:
@@ -123,7 +129,7 @@ upstream locations. To build from this repository's copies instead:
 
 ## Maintaining the branches, documentation and releases
 
-Make recipe and patch changes on the branch for that build. This branch (`ogg-libvlc`) retains its historical recipe;
+Make recipe and patch changes on the branch for that build. This branch (`ogg-libvlc`) builds the recipe's ogg-libvlc variant;
 the `ogg-libvlc` and `naked` READMEs describe their own versions and build options. Changes shared by all
 branches, such as documentation checks, should be applied to all three without merging their source archives.
 
@@ -176,7 +182,7 @@ license, found in its archive:
 
 | License | Components |
 |---|---|
-| GNU LGPL 2.1 or later | FFmpeg, libdvbpsi, libebml, libmatroska, GNU FriBidi, GNU libiconv, libplacebo, libsoxr, mpg123 |
+| GNU LGPL 2.1 or later | FFmpeg, libdvbpsi, libebml, libmatroska, GNU FriBidi, GNU libiconv, libplacebo, libsoxr, mpg123, FluidLite, Game_Music_Emu (built with its LGPL Nuked YM2612 emulator; the GPL MAME emulator in its archive is not built) |
 | BSD 2-Clause | dav1d, OpenJPEG |
 | BSD 3-Clause | libogg, libvorbis, libtheora, libvpx, libFLAC, Opus, Speex |
 | MIT | HarfBuzz ("Old MIT"), libxml2 |
@@ -187,6 +193,7 @@ license, found in its archive:
 | zlib License | zlib |
 | Boost Software License 1.0 | UTF8-CPP |
 | GSM license (permissive) | libgsm |
+| Public domain or MIT | stb_vorbis, inside FluidLite's archive |
 
 The Android app links libVLC only as these shared libraries (`libvlc.so`, `libvlcjni.so`) through the
 libvlcjni Java API, so a modified build made from these sources can take their place.

@@ -1,5 +1,5 @@
 {
   "main": "libvlc-lgpl-3.7.6-49",
-  "ogg-libvlc": "libvlc-lgpl-3.7.6-37",
-  "naked": "libvlc-lgpl-3.7.6-29-naked"
+  "ogg-libvlc": "libvlc-lgpl-3.7.6-49-ogg-libvlc",
+  "naked": "libvlc-lgpl-3.7.6-naked-1"
 }

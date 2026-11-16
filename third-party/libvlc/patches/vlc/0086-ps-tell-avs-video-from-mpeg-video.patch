@@ -1,4 +1,4 @@
-From c9946dd7a7254b5eaf07abb639fa6bdd058b4ba8 Mon Sep 17 00:00:00 2001
+From 74a830013f77c8abfb09f00b454627ef464b58ff Mon Sep 17 00:00:00 2001
 From: Drive Player <drive-player@localhost>
 Date: Wed, 21 Oct 2026 08:34:59 +0900
 Subject: [PATCH] ps: tell AVS video from MPEG video
@@ -11,10 +11,141 @@ stream map typing it as AVS video (0x42) was not read either.
 Take the type from the stream map, and without one, tell AVS video by
 the sequence header it starts with, whose start code MPEG video leaves
 reserved, as FFmpeg's demuxer probes it.
----
- modules/demux/mpeg/ps.h | 22 ++++++++++++++++++++++
- 1 file changed, 22 insertions(+)
 
+Only the stream's first packet of a video starts so, and a track was typed
+by the first packet read, which is another when reading begins elsewhere: a
+start time is sought once the first call has probed the length, before any
+packet of a stream is read. A stream started at a time (a still taken at
+one too) would have its video read as MPEG video still, whose packetizer
+waits for a sequence header to the end and shows nothing, while the clock
+runs. Keep the first packet of each video stream the probe of the beginning
+reads, and type the track by it. Read the stream map the probe meets there
+too: it types the tracks the same wherever reading begins, and a stream may
+hold it only at its start, or again only every group of pictures.
+---
+ modules/demux/mpeg/ps.c | 54 ++++++++++++++++++++++++++++++++++++++++-
+ modules/demux/mpeg/ps.h | 22 +++++++++++++++++
+ 2 files changed, 75 insertions(+), 1 deletion(-)
+
+diff --git a/modules/demux/mpeg/ps.c b/modules/demux/mpeg/ps.c
+index df77f3c..a57f5d0 100644
+--- a/modules/demux/mpeg/ps.c
++++ b/modules/demux/mpeg/ps.c
+@@ -82,6 +82,9 @@ vlc_module_end ()
+  * Local prototypes
+  *****************************************************************************/
+ 
++/* The stream ids of video: 0xe0 to 0xef */
++#define PS_VIDEO_ID_COUNT 16
++
+ struct demux_sys_t
+ {
+     ps_psm_t    psm;
+@@ -101,6 +104,13 @@ struct demux_sys_t
+     uint64_t    i_start_byte;
+     uint64_t    i_lastpack_byte;
+ 
++    /* The stream's first packet of each video stream (0xe0 to 0xef), kept
++     * from the probe of its beginning until its track is typed. A video the
++     * stream map does not type is told by how its data starts, which only
++     * that packet shows, and the first packet read may be another: a start
++     * time is sought before any is read. */
++    block_t    *p_video_start[PS_VIDEO_ID_COUNT];
++
+     int         i_aob_mlp_count;
+ 
+     bool  b_lost_sync;
+@@ -222,6 +232,8 @@ static int OpenCommon( vlc_object_t *p_this, bool b_force )
+     p_sys->i_aob_mlp_count = 0;
+     p_sys->i_start_byte = i_skip;
+     p_sys->i_lastpack_byte = i_skip;
++    for( int i = 0; i < PS_VIDEO_ID_COUNT; i++ )
++        p_sys->p_video_start[i] = NULL;
+ 
+     p_sys->b_lost_sync = false;
+     p_sys->b_have_pack = false;
+@@ -279,11 +291,24 @@ static void Close( vlc_object_t *p_this )
+             es_out_Del( p_demux->out, tk->es );
+     }
+ 
++    for( i = 0; i < PS_VIDEO_ID_COUNT; i++ )
++        if( p_sys->p_video_start[i] != NULL )
++            block_Release( p_sys->p_video_start[i] );
++
+     ps_psm_destroy( &p_sys->psm );
+ 
+     free( p_sys );
+ }
+ 
++/* Where the stream's first packet of the video stream i_id is kept, NULL for
++ * another stream */
++static block_t **VideoStart( demux_sys_t *p_sys, int i_id )
++{
++    if( i_id < 0xe0 || i_id > 0xef )
++        return NULL;
++    return &p_sys->p_video_start[i_id - 0xe0];
++}
++
+ static int Probe( demux_t *p_demux, bool b_end )
+ {
+     demux_sys_t *p_sys = p_demux->p_sys;
+@@ -319,6 +344,13 @@ static int Probe( demux_t *p_demux, bool b_end )
+     if( i_id >= 0xc0 )
+     {
+         ps_track_t *tk = &p_sys->tk[ps_id_to_tk(i_id)];
++
++        /* The beginning's first packet of a video stream is what its track
++         * is typed by, wherever reading begins */
++        block_t **pp_start = VideoStart( p_sys, i_id );
++        if( !b_end && pp_start != NULL && *pp_start == NULL && !tk->b_configured )
++            *pp_start = block_Duplicate( p_pkt );
++
+         if( !ps_pkt_parse_pes( VLC_OBJECT(p_demux), p_pkt, tk->i_skip ) &&
+              p_pkt->i_pts > VLC_TICK_INVALID )
+         {
+@@ -342,6 +374,15 @@ static int Probe( demux_t *p_demux, bool b_end )
+         }
+         p_sys->b_have_pack = true;
+     }
++    else if( !b_end && i_id == PS_STREAM_ID_MAP && p_pkt->i_buffer >= 4 )
++    {
++        /* The beginning's stream map types the tracks wherever reading
++         * begins: a stream may hold no other, and one that repeats it does
++         * so only every group of pictures */
++        if( p_sys->psm.i_version == 0xFFFF )
++            msg_Dbg( p_demux, "contains a PSM");
++        ps_psm_fill( &p_sys->psm, p_pkt, p_sys->tk, p_demux->out );
++    }
+ 
+     block_Release( p_pkt );
+     return VLC_DEMUXER_SUCCESS;
+@@ -562,7 +603,13 @@ static int Demux( demux_t *p_demux )
+ 
+             if( !tk->b_configured )
+             {
+-                if( !ps_track_fill( tk, &p_sys->psm, i_id, p_pkt, false ) )
++                /* A video is typed by the stream's first packet of it, kept
++                 * from the probe of the beginning: this one is another when
++                 * reading began elsewhere */
++                block_t **pp_start = VideoStart( p_sys, i_id );
++                block_t *p_first = pp_start != NULL && *pp_start != NULL ? *pp_start : p_pkt;
++
++                if( !ps_track_fill( tk, &p_sys->psm, i_id, p_first, false ) )
+                 {
+                     /* No PSM and no probing yet */
+                     if( p_sys->format == PSMF_PS )
+@@ -583,6 +630,11 @@ static int Demux( demux_t *p_demux )
+                     tk->es = es_out_Add( p_demux->out, &tk->fmt );
+                     b_new = true;
+                     tk->b_configured = true;
++                    if( pp_start != NULL && *pp_start != NULL )
++                    {
++                        block_Release( *pp_start );
++                        *pp_start = NULL;
++                    }
+                 }
+                 else
+                 {
 diff --git a/modules/demux/mpeg/ps.h b/modules/demux/mpeg/ps.h
 index 623fdb9..2725c9b 100644
 --- a/modules/demux/mpeg/ps.h
@@ -63,5 +194,5 @@ index 623fdb9..2725c9b 100644
                       ( p_pkt != NULL /* Not system */ || b_mpeg2only ) )
              {
 -- 
-2.55.0
+2.56.0
 

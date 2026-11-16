@@ -1,0 +1,47 @@
+From 98a7ed0ce2bb301bec56564cf3a766676a2f98f1 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 15 Nov 2026 10:05:37 +0900
+Subject: [PATCH] packetizer: take a block's discontinuity once
+
+A block flagged as a discontinuity resets the packetizer before its data is
+read. Once a picture is complete, what is left of the block is handed back
+to the caller, who hands it in again for the next picture: the flag was
+still on it, and reset the packetizer a second time, after the picture the
+block had completed.
+
+Where a seek lands on a block that holds the end of a key picture and the
+beginning of the next picture (a small key picture in a program stream's
+2 kB packets, as at the start of a stream that begins on a black picture),
+the H.264 packetizer lost the recovery the key picture gave and dropped
+every picture to the next key picture; the HEVC packetizer its complete
+sequence start, likewise; the MPEG video packetizer the beginning of the
+next picture. The window attaching to a playing stream seeks so: an H.264
+program stream showed nothing for its first group of pictures.
+
+Clear the flag once the packetizer is reset.
+---
+ modules/packetizer/packetizer_helper.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/modules/packetizer/packetizer_helper.h b/modules/packetizer/packetizer_helper.h
+index 42b881b..db0741e 100644
+--- a/modules/packetizer/packetizer_helper.h
++++ b/modules/packetizer/packetizer_helper.h
+@@ -130,6 +130,14 @@ static block_t *packetizer_PacketizeBlock( packetizer_t *p_pack, block_t **pp_bl
+             block_Release( p_block );
+             return NULL;
+         }
++        /* The discontinuity is taken. What is left of a block that completes
++         * a picture is handed back to the caller, who hands it in again: with
++         * the flag still on it, the block that begins the next picture too
++         * reset the packetizer a second time, after that picture. A key
++         * picture so lost the recovery it gave, and every picture to the next
++         * key picture was dropped (H.264, HEVC), or the beginning of the next
++         * picture was (MPEG video). */
++        p_block->i_flags &= ~BLOCK_FLAG_DISCONTINUITY;
+     }
+ 
+     if( p_block )
+-- 
+2.56.0
+

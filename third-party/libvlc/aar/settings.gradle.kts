@@ -1,4 +1,4 @@
-// Packages Drive Player's own libVLC — the native libraries third-party/libvlc/build-native.sh
+// Packages DrivePlayer's own libVLC — the native libraries third-party/libvlc/build-native.sh
 // builds and the libvlcjni bindings they come with — as an Android library, and publishes it to the
 // local repository the app's build resolves it from. A build of its own, not a project of the app's:
 // it runs once per libVLC build (./libvlc_build.sh build), and the app consumes its result
