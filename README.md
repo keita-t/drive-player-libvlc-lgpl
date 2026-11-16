@@ -9,7 +9,8 @@ permissive licenses only, for arm64-v8a.
 
 Each published build of the library has a tag named after its version (`libvlc-lgpl-<version>`), holding exactly the
 sources, patches and build scripts that produced that build. Each maintained branch keeps its latest
-published build available as a GitHub Release; older releases remain available too:
+published build available as a GitHub Release. Releases are kept as they are published from 3.7.6-49 on; the
+releases of earlier builds, other than the ones listed here, were withdrawn, and their tags remain:
 
 | Library version | Tag | Branch | What it is |
 |---|---|---|---|
@@ -151,7 +152,7 @@ archive layout described by the existing release. Publish the archive with that 
 branch=ogg-libvlc # main, ogg-libvlc or naked
 tag='libvlc-lgpl-<version>'
 gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
 ```
 
 Replace `<version>` with the actual version (including any variant suffix) before running the command.

@@ -1,4 +1,4 @@
-<!-- source-sha256: 51d3c24376a1866c1a32e885a0b9fc1d03190780ca2249422b90a40119ea647f -->
+<!-- source-sha256: 9ee4543cc25bd6562abb23ce6ff99fbe023ffd4e28b39575198335dc710283d0 -->
 
 # DrivePlayer 向け libVLC — 対応するソースコード
 
@@ -11,7 +11,8 @@ libVLC と Java bindings（libvlcjni）を、GNU Lesser General Public License 2
 
 公開ビルドにはバージョンに対応する `libvlc-lgpl-<version>` タグを付け、実際に使ったソース、
 パッチ、ビルドスクリプトを保持します。管理対象の各ブランチでは、最新の公開ビルドを
-GitHub Release で入手できる状態に保ち、過去の Release も残します。
+GitHub Release で入手できる状態に保ちます。3.7.6-49 以降の Release は公開したまま残します。
+それより前のビルドの Release は、ここに挙げたものを除いて取り下げました。タグは残っています。
 
 | ライブラリーのバージョン | タグ | ブランチ | 内容 |
 |---|---|---|---|
@@ -154,7 +155,7 @@ python3 -m unittest discover -s tests
 branch=ogg-libvlc # main, ogg-libvlc or naked
 tag='libvlc-lgpl-<version>'
 gh release create "$tag" "$tag.tar.xz" --verify-tag --target "$branch" \
-    --title "${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
+    --title "libvlc-lgpl ${tag#libvlc-lgpl-} ($branch)" --notes-file release-notes.md --latest=false
 ```
 
 実行前に `<version>` を実際のバージョン（必要なバリアント接尾辞を含む）に置き換えます。
